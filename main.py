@@ -286,6 +286,7 @@ async def audit_log(context: ContextTypes.DEFAULT_TYPE, user_id, username, user_
     """Enhanced audit logging with both user and bot messages"""
     msg = (
         f"📨 **گزارش تعامل**\n\n"
+        f"👤 ربات: Gold Purchase)\n"
         f"👤 کاربر: {username} ({user_id})\n"
         f"⏰ زمان: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
         f"📩 **پیام کاربر:**\n{user_msg}\n\n"
