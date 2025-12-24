@@ -20,9 +20,6 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from io import BytesIO
-from dotenv import load_dotenv
-
-load_dotenv() 
 
 # ================= LOGGING =================
 logging.basicConfig(
@@ -286,7 +283,6 @@ async def audit_log(context: ContextTypes.DEFAULT_TYPE, user_id, username, user_
     """Enhanced audit logging with both user and bot messages"""
     msg = (
         f"📨 **گزارش تعامل**\n\n"
-        f"👤 ربات: Gold Purchase)\n"
         f"👤 کاربر: {username} ({user_id})\n"
         f"⏰ زمان: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
         f"📩 **پیام کاربر:**\n{user_msg}\n\n"
@@ -330,11 +326,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "👋 سلام! به ربات تحلیل طلا خوش آمدید\n\n"
         "این ربات قیمت طلا را بر اساس:\n"
         "• دلار آزاد 💵\n"
-        "• اونس جهانی 🌍\n"
-        "محاسبه کرده و براساس داده های لحظه ای"
-        "\n سیگنال خرید/فروش/رصد می دهد.\n\n"
-        "⚠️ **تذکر مهم:**\n"
-        "این ربات تنها بر اساس تحلیل داده‌های فعلی، پیشنهادهایی را ارائه می‌دهد. خرید و فروش طلا و ارز، دارای ریسک مالی است. مسئولیت هرگونه تصمیم‌گیری و اقدام بر عهده کاربر بوده و سازنده و ربات هیچ مسئولیتی در قبال زیان‌های احتمالی ندارند. لطفاً با آگاهی و احتیاط عمل کنید.\n\n"
+        "• اونس جهانی 🌍\n\n"
         "📏 **قوانین تصمیم‌گیری:**\n"
         "🟢 اختلاف کمتر از 100 هزار تومان → خرید\n"
         "🟡 اختلاف 100-500 هزار تومان → صبر و رصد\n"
@@ -517,10 +509,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "toggle_notif":
         await toggle_notifications(query, query.from_user.id)
     elif query.data == "calc":
+        # Store that we're waiting for calc amount from this user
+        context.user_data['waiting_for_calc'] = True
         await query.edit_message_text("💰 مبلغ خود را به تومان وارد کنید:")
 
 # ================= CALC CONVERSATION =================
 async def calc_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['waiting_for_calc'] = True
     await update.message.reply_text("💰 مبلغ خود را به تومان وارد کنید:")
     return ASK_AMOUNT
 
@@ -550,12 +545,23 @@ async def calc_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await audit_log(context, user.id, user.username, f"محاسبه: {money:,}", response)
         
     except ValueError:
-        await processing_msg.edit_text("❌ عدد معتبر وارد کنید")
+        await processing_msg.edit_text("❌ عدد معتبر وارد کنید", reply_markup=main_menu_keyboard())
     except Exception as e:
         logger.exception("Calc failed")
-        await processing_msg.edit_text("❌ خطا در دریافت اطلاعات. لطفاً دوباره تلاش کنید.")
+        await processing_msg.edit_text("❌ خطا در دریافت اطلاعات. لطفاً دوباره تلاش کنید.", reply_markup=main_menu_keyboard())
     
+    # Clear the flag
+    context.user_data['waiting_for_calc'] = False
     return ConversationHandler.END
+
+async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle regular text messages - check if waiting for calc input"""
+    if context.user_data.get('waiting_for_calc'):
+        # Process as calc amount
+        await calc_amount(update, context)
+    else:
+        # Ignore other text messages or provide help
+        pass
 
 # ================= ADMIN COMMANDS =================
 def is_admin(user_id):
@@ -686,8 +692,11 @@ def main():
         fallbacks=[]
     ))
     
-    # Callback handlers
+    # Callback handlers (must be before text handler)
     app.add_handler(CallbackQueryHandler(button_callback))
+    
+    # Handle text messages (for inline button calc)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
     
     # Job queue for price monitoring (every 30 minutes)
     # Optional: install with `pip install "python-telegram-bot[job-queue]"`
