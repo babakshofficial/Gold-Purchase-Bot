@@ -486,21 +486,53 @@ def generate_price_difference_chart(days=7):
 # ================= AUDIT LOGGING =================
 async def audit_log(context: ContextTypes.DEFAULT_TYPE, user_id, username, user_msg, bot_response):
     """Enhanced audit logging with both user and bot messages"""
+    if not PRIVATE_CHANNEL_ID:
+        logger.warning("PRIVATE_CHANNEL_ID not set - skipping audit log")
+        return
+    
+    # Ensure username is not None
+    username_display = username if username else "No username"
+    
+    # Truncate very long messages to avoid Telegram limits
+    max_msg_length = 3000
+    if len(user_msg) > max_msg_length:
+        user_msg = user_msg[:max_msg_length] + "... (truncated)"
+    if len(bot_response) > max_msg_length:
+        bot_response = bot_response[:max_msg_length] + "... (truncated)"
+    
     msg = (
         f"📨 **گزارش تعامل**\n\n"
-        f"👤 کاربر: {username} ({user_id})\n"
+        f"👤 کاربر: {username_display} (`{user_id}`)\n"
         f"⏰ زمان: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-        f"📩 **پیام کاربر:**\n{user_msg}\n\n"
-        f"🤖 **پاسخ ربات:**\n{bot_response}"
+        f"📩 **پیام کاربر:**\n`{user_msg}`\n\n"
+        f"🤖 **پاسخ ربات:**\n{bot_response[:1000]}"  # Limit bot response to prevent overflow
     )
+    
     try:
         await context.bot.send_message(
             chat_id=PRIVATE_CHANNEL_ID,
             text=msg,
             parse_mode="Markdown"
         )
+        logger.info(f"Audit log sent for user {user_id}")
     except Exception as e:
-        logger.warning(f"Audit send failed: {e}")
+        logger.error(f"Audit send failed for user {user_id}: {e}")
+        # Try sending without markdown as fallback
+        try:
+            simple_msg = (
+                f"📨 گزارش تعامل\n\n"
+                f"کاربر: {username_display} ({user_id})\n"
+                f"زمان: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+                f"پیام کاربر: {user_msg[:500]}\n\n"
+                f"پاسخ ربات: {bot_response[:500]}"
+            )
+            await context.bot.send_message(
+                chat_id=PRIVATE_CHANNEL_ID,
+                text=simple_msg
+            )
+            logger.info(f"Audit log sent (fallback) for user {user_id}")
+        except Exception as e2:
+            logger.error(f"Audit fallback also failed for user {user_id}: {e2}")
 
 # ================= INLINE KEYBOARDS =================
 def main_menu_keyboard():
@@ -531,11 +563,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "👋 سلام! به ربات تحلیل طلا خوش آمدید\n\n"
         "این ربات قیمت طلا را بر اساس:\n"
         "• دلار آزاد 💵\n"
-        "• اونس جهانی 🌍"
-        "\nمحاسبه کرده و براساس داده های لحظه ای"
-        "\n سیگنال خرید/فروش/رصد می دهد.\n\n"
-        "⚠️ **تذکر مهم:**\n"
-        "این ربات تنها بر اساس تحلیل داده‌های فعلی، پیشنهادهایی را ارائه می‌دهد. خرید و فروش طلا و ارز، دارای ریسک مالی است. مسئولیت هرگونه تصمیم‌گیری و اقدام بر عهده کاربر بوده و سازنده و ربات هیچ مسئولیتی در قبال زیان‌های احتمالی ندارند. لطفاً با آگاهی و احتیاط عمل کنید.\n\n"
+        "• اونس جهانی 🌍\n\n"
         "📏 **قوانین تصمیم‌گیری:**\n"
         "🟢 اختلاف کمتر از 100 هزار تومان → خرید\n"
         "🟡 اختلاف 100-500 هزار تومان → صبر و رصد\n"
@@ -593,7 +621,11 @@ async def gold_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE, quer
         else:
             await processing_msg.edit_text(response, parse_mode="Markdown", reply_markup=main_menu_keyboard())
         
-        await audit_log(context, user.id, user.username, user_msg, response)
+        # Audit log with proper error handling
+        try:
+            await audit_log(context, user.id, user.username, user_msg, response)
+        except Exception as e:
+            logger.error(f"Failed to log gold_analysis for user {user.id}: {e}")
         
     except Exception as e:
         logger.exception("Gold analysis failed")
@@ -631,7 +663,11 @@ async def show_chart(update: Update, context: ContextTypes.DEFAULT_TYPE, query=N
         else:
             await update.message.reply_photo(photo=chart, caption=caption)
         
-        await audit_log(context, user.id, user.username, "درخواست نمودار", "نمودار ارسال شد")
+        # Audit log with proper error handling
+        try:
+            await audit_log(context, user.id, user.username, "درخواست نمودار", "نمودار ارسال شد")
+        except Exception as e:
+            logger.error(f"Failed to log show_chart for user {user.id}: {e}")
         
     except Exception as e:
         logger.exception("Chart generation failed")
@@ -758,7 +794,12 @@ async def calc_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         
         await processing_msg.edit_text(response, parse_mode="Markdown", reply_markup=main_menu_keyboard())
-        await audit_log(context, user.id, user.username, f"محاسبه: {money:,}", response)
+        
+        # Audit log with proper error handling
+        try:
+            await audit_log(context, user.id, user.username, f"محاسبه: {money:,}", response)
+        except Exception as e:
+            logger.error(f"Failed to log calc_amount for user {user.id}: {e}")
         
     except ValueError:
         await processing_msg.edit_text("❌ عدد معتبر وارد کنید", reply_markup=main_menu_keyboard())
@@ -848,6 +889,54 @@ async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, query=N
         await query.edit_message_text(response, parse_mode="Markdown", reply_markup=admin_keyboard())
     else:
         await update.message.reply_text(response, parse_mode="Markdown", reply_markup=admin_keyboard())
+
+async def test_audit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Test audit logging - admin only"""
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ شما دسترسی ندارید")
+        return
+    
+    user = update.effective_user
+    
+    # Check if PRIVATE_CHANNEL_ID is set
+    if not PRIVATE_CHANNEL_ID:
+        await update.message.reply_text(
+            "❌ **خطا در تنظیمات**\n\n"
+            "PRIVATE_CHANNEL_ID تنظیم نشده است.\n"
+            "لطفاً آن را در فایل .env تنظیم کنید."
+        )
+        return
+    
+    # Try to send a test message
+    test_msg = (
+        "🧪 **تست ارسال لاگ**\n\n"
+        f"👤 ادمین: {user.username} ({user.id})\n"
+        f"⏰ زمان: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+        "این یک پیام تست است."
+    )
+    
+    try:
+        await context.bot.send_message(
+            chat_id=PRIVATE_CHANNEL_ID,
+            text=test_msg,
+            parse_mode="Markdown"
+        )
+        await update.message.reply_text(
+            "✅ **تست موفق**\n\n"
+            f"پیام با موفقیت به کانال {PRIVATE_CHANNEL_ID} ارسال شد.\n"
+            "لاگ‌ها باید کار کنند."
+        )
+    except Exception as e:
+        await update.message.reply_text(
+            f"❌ **تست ناموفق**\n\n"
+            f"خطا: `{str(e)}`\n\n"
+            "**راهنمای رفع مشکل:**\n"
+            "1. مطمئن شوید PRIVATE_CHANNEL_ID صحیح است\n"
+            "2. ربات باید ادمین کانال باشد\n"
+            "3. ID کانال باید با - شروع شود (مثلاً -1001234567890)\n"
+            "4. برای گرفتن ID کانال، پیامی را forward کنید به @userinfobot",
+            parse_mode="Markdown"
+        )
 
 async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
@@ -1219,6 +1308,7 @@ def main():
     # Admin commands
     app.add_handler(CommandHandler("admin", lambda u, c: admin_menu(u, c)))
     app.add_handler(CommandHandler("stats", admin_stats))
+    app.add_handler(CommandHandler("test_audit", test_audit))
     app.add_handler(ConversationHandler(
         entry_points=[CommandHandler("broadcast", admin_broadcast_start)],
         states={ASK_BROADCAST: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_broadcast_send)]},
