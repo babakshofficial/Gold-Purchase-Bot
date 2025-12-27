@@ -84,8 +84,20 @@ init_db()
 def add_or_update_user(user_id, username, first_name):
     conn = sqlite3.connect('gold_bot.db')
     c = conn.cursor()
-    c.execute('''INSERT OR REPLACE INTO users (user_id, username, first_name)
-                 VALUES (?, ?, ?)''', (user_id, username, first_name))
+    # Check if user exists
+    c.execute('SELECT user_id FROM users WHERE user_id = ?', (user_id,))
+    exists = c.fetchone()
+    
+    if exists:
+        # Update only username and first_name, preserve other settings
+        c.execute('''UPDATE users SET username = ?, first_name = ? WHERE user_id = ?''',
+                  (username, first_name, user_id))
+    else:
+        # Insert new user with defaults
+        c.execute('''INSERT INTO users (user_id, username, first_name, notifications, buy_threshold, wait_threshold)
+                     VALUES (?, ?, ?, 1, ?, ?)''',
+                  (user_id, username, first_name, DEFAULT_BUY_THRESHOLD, DEFAULT_WAIT_THRESHOLD))
+    
     conn.commit()
     conn.close()
 
