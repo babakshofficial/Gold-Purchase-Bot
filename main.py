@@ -45,6 +45,8 @@ DEFAULT_WAIT_THRESHOLD = 500_000
 
 ASK_AMOUNT = 1
 ASK_BROADCAST = 2
+ASK_DB_ACTION = 3
+ASK_EXPORT_DAYS = 4
 
 # ================= DATABASE =================
 def init_db():
@@ -141,6 +143,106 @@ def get_user_count():
     count = c.fetchone()[0]
     conn.close()
     return count
+
+def get_recent_users(days=7):
+    """Get users who joined in the last N days"""
+    conn = sqlite3.connect('gold_bot.db')
+    c = conn.cursor()
+    c.execute('''SELECT COUNT(*) FROM users 
+                 WHERE created_at >= datetime('now', '-' || ? || ' days')''', (days,))
+    count = c.fetchone()[0]
+    conn.close()
+    return count
+
+def get_active_users(days=7):
+    """Get count of users who have used the bot recently (simplified - based on notifications)"""
+    conn = sqlite3.connect('gold_bot.db')
+    c = conn.cursor()
+    c.execute('SELECT COUNT(*) FROM users WHERE notifications = 1')
+    count = c.fetchone()[0]
+    conn.close()
+    return count
+
+def get_price_stats():
+    """Get price statistics"""
+    conn = sqlite3.connect('gold_bot.db')
+    c = conn.cursor()
+    
+    # Latest price
+    c.execute('''SELECT tala_price, fair_price, difference, timestamp 
+                 FROM price_history ORDER BY timestamp DESC LIMIT 1''')
+    latest = c.fetchone()
+    
+    # Average prices last 24 hours
+    c.execute('''SELECT AVG(tala_price), AVG(fair_price), AVG(difference)
+                 FROM price_history 
+                 WHERE timestamp >= datetime('now', '-1 day')''')
+    avg_24h = c.fetchone()
+    
+    # Min/Max last 24 hours
+    c.execute('''SELECT MIN(tala_price), MAX(tala_price)
+                 FROM price_history 
+                 WHERE timestamp >= datetime('now', '-1 day')''')
+    minmax_24h = c.fetchone()
+    
+    conn.close()
+    return {
+        'latest': latest,
+        'avg_24h': avg_24h,
+        'minmax_24h': minmax_24h
+    }
+
+def export_users_to_csv():
+    """Export users to CSV format"""
+    conn = sqlite3.connect('gold_bot.db')
+    c = conn.cursor()
+    c.execute('''SELECT user_id, username, first_name, notifications, 
+                 buy_threshold, wait_threshold, created_at FROM users''')
+    users = c.fetchall()
+    conn.close()
+    
+    csv_content = "user_id,username,first_name,notifications,buy_threshold,wait_threshold,created_at\n"
+    for user in users:
+        csv_content += ",".join(str(x) if x is not None else "" for x in user) + "\n"
+    
+    return csv_content
+
+def export_price_history_to_csv(days=7):
+    """Export price history to CSV format"""
+    conn = sqlite3.connect('gold_bot.db')
+    c = conn.cursor()
+    c.execute('''SELECT timestamp, tala_price, usd_price, ounce_price, fair_price, difference
+                 FROM price_history 
+                 WHERE timestamp >= datetime('now', '-' || ? || ' days')
+                 ORDER BY timestamp DESC''', (days,))
+    prices = c.fetchall()
+    conn.close()
+    
+    csv_content = "timestamp,tala_price,usd_price,ounce_price,fair_price,difference\n"
+    for price in prices:
+        csv_content += ",".join(str(x) for x in price) + "\n"
+    
+    return csv_content
+
+def clear_old_price_history(days=30):
+    """Clear price history older than N days"""
+    conn = sqlite3.connect('gold_bot.db')
+    c = conn.cursor()
+    c.execute('''DELETE FROM price_history 
+                 WHERE timestamp < datetime('now', '-' || ? || ' days')''', (days,))
+    deleted = c.rowcount
+    conn.commit()
+    conn.close()
+    return deleted
+
+def get_db_size():
+    """Get database file size in MB"""
+    import os
+    if os.path.exists('gold_bot.db'):
+        size_bytes = os.path.getsize('gold_bot.db')
+        size_mb = size_bytes / (1024 * 1024)
+        return size_mb
+    return 0
 
 # ================= HELPERS =================
 def normalize(text: str) -> str:
@@ -278,6 +380,97 @@ def generate_price_chart():
     
     return buf
 
+def generate_user_growth_chart(days=30):
+    """Generate user growth chart"""
+    conn = sqlite3.connect('gold_bot.db')
+    c = conn.cursor()
+    c.execute('''SELECT DATE(created_at) as date, COUNT(*) as count
+                 FROM users 
+                 WHERE created_at >= datetime('now', '-' || ? || ' days')
+                 GROUP BY DATE(created_at)
+                 ORDER BY date''', (days,))
+    data = c.fetchall()
+    conn.close()
+    
+    if len(data) < 2:
+        return None
+    
+    dates = [datetime.strptime(d[0], '%Y-%m-%d') for d in data]
+    counts = [d[1] for d in data]
+    cumulative = []
+    total = 0
+    for count in counts:
+        total += count
+        cumulative.append(total)
+    
+    plt.figure(figsize=(10, 6))
+    plt.plot(dates, cumulative, marker='o', linewidth=2, color='#2196F3')
+    plt.fill_between(dates, cumulative, alpha=0.3, color='#2196F3')
+    
+    plt.xlabel('تاریخ')
+    plt.ylabel('تعداد کاربران')
+    plt.title(f'رشد کاربران ({days} روز اخیر)')
+    plt.grid(True, alpha=0.3)
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    
+    buf = BytesIO()
+    plt.savefig(buf, format='png', dpi=100)
+    buf.seek(0)
+    plt.close()
+    
+    return buf
+
+def generate_price_difference_chart(days=7):
+    """Generate price difference trend chart"""
+    conn = sqlite3.connect('gold_bot.db')
+    c = conn.cursor()
+    c.execute('''SELECT timestamp, difference
+                 FROM price_history 
+                 WHERE timestamp >= datetime('now', '-' || ? || ' days')
+                 ORDER BY timestamp''', (days,))
+    data = c.fetchall()
+    conn.close()
+    
+    if len(data) < 2:
+        return None
+    
+    timestamps = [datetime.fromisoformat(d[0]) for d in data]
+    differences = [d[1] for d in data]
+    
+    # Color code based on thresholds
+    colors = []
+    for diff in differences:
+        if diff < DEFAULT_BUY_THRESHOLD:
+            colors.append('#4CAF50')  # Green
+        elif diff < DEFAULT_WAIT_THRESHOLD:
+            colors.append('#FFC107')  # Yellow
+        else:
+            colors.append('#F44336')  # Red
+    
+    plt.figure(figsize=(12, 6))
+    plt.scatter(timestamps, differences, c=colors, s=50, alpha=0.6)
+    plt.plot(timestamps, differences, linewidth=1, alpha=0.5, color='gray')
+    
+    # Add threshold lines
+    plt.axhline(y=DEFAULT_BUY_THRESHOLD, color='green', linestyle='--', label='آستانه خرید', alpha=0.7)
+    plt.axhline(y=DEFAULT_WAIT_THRESHOLD, color='red', linestyle='--', label='آستانه فروش', alpha=0.7)
+    
+    plt.xlabel('زمان')
+    plt.ylabel('اختلاف قیمت (تومان)')
+    plt.title(f'روند اختلاف قیمت ({days} روز اخیر)')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    
+    buf = BytesIO()
+    plt.savefig(buf, format='png', dpi=100)
+    buf.seek(0)
+    plt.close()
+    
+    return buf
+
 # ================= AUDIT LOGGING =================
 async def audit_log(context: ContextTypes.DEFAULT_TYPE, user_id, username, user_msg, bot_response):
     """Enhanced audit logging with both user and bot messages"""
@@ -326,11 +519,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "👋 سلام! به ربات تحلیل طلا خوش آمدید\n\n"
         "این ربات قیمت طلا را بر اساس:\n"
         "• دلار آزاد 💵\n"
-        "• اونس جهانی 🌍"
-        "\nمحاسبه کرده و براساس داده های لحظه ای"
-        "\n سیگنال خرید/فروش/رصد می دهد.\n\n"
-        "⚠️ **تذکر مهم:**\n"
-        "این ربات تنها بر اساس تحلیل داده‌های فعلی، پیشنهادهایی را ارائه می‌دهد. خرید و فروش طلا و ارز، دارای ریسک مالی است. مسئولیت هرگونه تصمیم‌گیری و اقدام بر عهده کاربر بوده و سازنده و ربات هیچ مسئولیتی در قبال زیان‌های احتمالی ندارند. لطفاً با آگاهی و احتیاط عمل کنید.\n\n"
+        "• اونس جهانی 🌍\n\n"
         "📏 **قوانین تصمیم‌گیری:**\n"
         "🟢 اختلاف کمتر از 100 هزار تومان → خرید\n"
         "🟡 اختلاف 100-500 هزار تومان → صبر و رصد\n"
@@ -375,9 +564,10 @@ async def gold_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE, quer
             f"{emoji} **تحلیل بازار طلا**\n\n"
             f"💵 دلار آزاد: {usd_toman:,} تومان\n"
             f"🌍 اونس جهانی: ${ounce}\n"
-            f"🏷 قیمت بازار: {tala:,} تومان\n"
+            f"🏷 قیمت بازار (هر گرم): {tala:,} تومان\n"
+            f"📊 قیمت بازار (مثقال): {int(tala * 4.6):,} تومان\n"
             f"⚖️ قیمت منصفانه: {int(fair):,} تومان\n\n"
-            f"📊 اختلاف قیمت: {int(var):,} تومان\n\n"
+            f"📉 اختلاف قیمت: {int(var):,} تومان\n\n"
             f"{verdict}\n\n"
             "👤 Bot creator: @b4bak"
         )
@@ -495,6 +685,12 @@ async def help_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, query=No
 # ================= CALLBACK HANDLER =================
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    
+    # Check if it's an admin callback
+    if query.data.startswith("admin_") or query.data.startswith("chart_") or query.data.startswith("db_") or query.data.startswith("export_"):
+        await admin_callback_handler(update, context)
+        return
+    
     await query.answer()
     
     if query.data == "gold":
@@ -571,6 +767,72 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 def is_admin(user_id):
     return user_id in ADMIN_IDS
 
+def admin_keyboard():
+    """Admin main menu keyboard"""
+    keyboard = [
+        [InlineKeyboardButton("📊 آمار کلی", callback_data="admin_stats"),
+         InlineKeyboardButton("👥 آمار کاربران", callback_data="admin_users")],
+        [InlineKeyboardButton("💰 آمار قیمت‌ها", callback_data="admin_prices"),
+         InlineKeyboardButton("📈 نمودارها", callback_data="admin_charts")],
+        [InlineKeyboardButton("💾 مدیریت دیتابیس", callback_data="admin_db"),
+         InlineKeyboardButton("📤 خروجی داده", callback_data="admin_export")],
+        [InlineKeyboardButton("📢 ارسال پیام همگانی", callback_data="admin_broadcast_menu")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+def admin_charts_keyboard():
+    """Admin charts menu keyboard"""
+    keyboard = [
+        [InlineKeyboardButton("📈 نمودار قیمت (24 ساعت)", callback_data="chart_price_24h")],
+        [InlineKeyboardButton("📊 نمودار اختلاف (7 روز)", callback_data="chart_diff_7d")],
+        [InlineKeyboardButton("👥 نمودار رشد کاربران (30 روز)", callback_data="chart_users_30d")],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="admin_menu")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+def admin_db_keyboard():
+    """Admin database management keyboard"""
+    keyboard = [
+        [InlineKeyboardButton("🗑 پاک کردن تاریخچه قدیمی", callback_data="db_clean_old")],
+        [InlineKeyboardButton("📊 اطلاعات دیتابیس", callback_data="db_info")],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="admin_menu")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+def admin_export_keyboard():
+    """Admin export data keyboard"""
+    keyboard = [
+        [InlineKeyboardButton("👥 خروجی کاربران (CSV)", callback_data="export_users")],
+        [InlineKeyboardButton("💰 خروجی قیمت‌ها 7 روز", callback_data="export_prices_7")],
+        [InlineKeyboardButton("💰 خروجی قیمت‌ها 30 روز", callback_data="export_prices_30")],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="admin_menu")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, query=None):
+    """Show admin main menu"""
+    if query:
+        user = query.from_user
+    else:
+        user = update.effective_user
+    
+    if not is_admin(user.id):
+        if query:
+            await query.answer("❌ شما دسترسی ندارید", show_alert=True)
+        else:
+            await update.message.reply_text("❌ شما دسترسی ندارید")
+        return
+    
+    response = (
+        "👑 **پنل مدیریت**\n\n"
+        "از منوی زیر گزینه مورد نظر را انتخاب کنید:"
+    )
+    
+    if query:
+        await query.edit_message_text(response, parse_mode="Markdown", reply_markup=admin_keyboard())
+    else:
+        await update.message.reply_text(response, parse_mode="Markdown", reply_markup=admin_keyboard())
+
 async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("❌ شما دسترسی ندارید")
@@ -586,13 +848,270 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.close()
     
     response = (
-        "📊 **آمار ربات**\n\n"
+        "📊 **آمار کلی ربات**\n\n"
         f"👥 تعداد کاربران: {user_count}\n"
         f"🔔 اعلان فعال: {notif_count}\n"
         f"📈 رکوردهای قیمت: {history_count}\n"
     )
     
-    await update.message.reply_text(response, parse_mode="Markdown")
+    await update.message.reply_text(response, parse_mode="Markdown", reply_markup=admin_keyboard())
+
+async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle admin panel callbacks"""
+    query = update.callback_query
+    
+    if not is_admin(query.from_user.id):
+        await query.answer("❌ شما دسترسی ندارید", show_alert=True)
+        return
+    
+    await query.answer()
+    
+    if query.data == "admin_menu":
+        await admin_menu(update, context, query)
+    
+    elif query.data == "admin_stats":
+        user_count = get_user_count()
+        recent_users = get_recent_users(7)
+        active_users = get_active_users(7)
+        
+        conn = sqlite3.connect('gold_bot.db')
+        c = conn.cursor()
+        c.execute('SELECT COUNT(*) FROM users WHERE notifications = 1')
+        notif_count = c.fetchone()[0]
+        c.execute('SELECT COUNT(*) FROM price_history')
+        history_count = c.fetchone()[0]
+        conn.close()
+        
+        db_size = get_db_size()
+        
+        response = (
+            "📊 **آمار کلی ربات**\n\n"
+            f"👥 کل کاربران: {user_count}\n"
+            f"🆕 کاربران جدید (7 روز): {recent_users}\n"
+            f"✅ کاربران فعال: {active_users}\n"
+            f"🔔 اعلان فعال: {notif_count}\n\n"
+            f"📈 رکوردهای قیمت: {history_count}\n"
+            f"💾 حجم دیتابیس: {db_size:.2f} MB"
+        )
+        
+        await query.edit_message_text(response, parse_mode="Markdown", reply_markup=admin_keyboard())
+    
+    elif query.data == "admin_users":
+        user_count = get_user_count()
+        recent_7d = get_recent_users(7)
+        recent_30d = get_recent_users(30)
+        
+        conn = sqlite3.connect('gold_bot.db')
+        c = conn.cursor()
+        c.execute('SELECT COUNT(*) FROM users WHERE notifications = 1')
+        notif_on = c.fetchone()[0]
+        c.execute('SELECT COUNT(*) FROM users WHERE notifications = 0')
+        notif_off = c.fetchone()[0]
+        conn.close()
+        
+        response = (
+            "👥 **آمار کاربران**\n\n"
+            f"📊 کل کاربران: {user_count}\n"
+            f"🆕 عضو شده 7 روز اخیر: {recent_7d}\n"
+            f"🆕 عضو شده 30 روز اخیر: {recent_30d}\n\n"
+            f"🔔 اعلان فعال: {notif_on}\n"
+            f"🔕 اعلان غیرفعال: {notif_off}\n"
+            f"📊 نرخ فعال‌سازی: {(notif_on/user_count*100) if user_count > 0 else 0:.1f}%"
+        )
+        
+        await query.edit_message_text(response, parse_mode="Markdown", reply_markup=admin_keyboard())
+    
+    elif query.data == "admin_prices":
+        stats = get_price_stats()
+        
+        if stats['latest']:
+            latest_price, latest_fair, latest_diff, latest_time = stats['latest']
+            response = (
+                "💰 **آمار قیمت‌ها**\n\n"
+                f"**آخرین قیمت:**\n"
+                f"🏷 بازار: {latest_price:,} تومان\n"
+                f"⚖️ منصفانه: {int(latest_fair):,} تومان\n"
+                f"📊 اختلاف: {int(latest_diff):,} تومان\n"
+                f"⏰ زمان: {latest_time}\n\n"
+            )
+            
+            if stats['avg_24h'][0]:
+                avg_market, avg_fair, avg_diff = stats['avg_24h']
+                response += (
+                    f"**میانگین 24 ساعت:**\n"
+                    f"🏷 بازار: {int(avg_market):,} تومان\n"
+                    f"⚖️ منصفانه: {int(avg_fair):,} تومان\n"
+                    f"📊 اختلاف: {int(avg_diff):,} تومان\n\n"
+                )
+            
+            if stats['minmax_24h'][0]:
+                min_price, max_price = stats['minmax_24h']
+                response += (
+                    f"**محدوده 24 ساعت:**\n"
+                    f"⬇️ کمترین: {min_price:,} تومان\n"
+                    f"⬆️ بیشترین: {max_price:,} تومان\n"
+                    f"📊 نوسان: {max_price - min_price:,} تومان"
+                )
+        else:
+            response = "💰 **آمار قیمت‌ها**\n\nداده‌ای موجود نیست."
+        
+        await query.edit_message_text(response, parse_mode="Markdown", reply_markup=admin_keyboard())
+    
+    elif query.data == "admin_charts":
+        await query.edit_message_text(
+            "📈 **نمودارهای تحلیلی**\n\nنمودار مورد نظر را انتخاب کنید:",
+            reply_markup=admin_charts_keyboard()
+        )
+    
+    elif query.data == "chart_price_24h":
+        await query.edit_message_text("⏳ در حال تولید نمودار...")
+        chart = generate_price_chart()
+        if chart:
+            await context.bot.send_photo(
+                chat_id=query.message.chat_id,
+                photo=chart,
+                caption="📈 نمودار مقایسه قیمت (24 ساعت اخیر)"
+            )
+            await query.message.reply_text("نمودار ارسال شد", reply_markup=admin_charts_keyboard())
+        else:
+            await query.edit_message_text(
+                "❌ داده کافی برای نمودار وجود ندارد",
+                reply_markup=admin_charts_keyboard()
+            )
+    
+    elif query.data == "chart_diff_7d":
+        await query.edit_message_text("⏳ در حال تولید نمودار...")
+        chart = generate_price_difference_chart(7)
+        if chart:
+            await context.bot.send_photo(
+                chat_id=query.message.chat_id,
+                photo=chart,
+                caption="📊 نمودار اختلاف قیمت (7 روز اخیر)"
+            )
+            await query.message.reply_text("نمودار ارسال شد", reply_markup=admin_charts_keyboard())
+        else:
+            await query.edit_message_text(
+                "❌ داده کافی برای نمودار وجود ندارد",
+                reply_markup=admin_charts_keyboard()
+            )
+    
+    elif query.data == "chart_users_30d":
+        await query.edit_message_text("⏳ در حال تولید نمودار...")
+        chart = generate_user_growth_chart(30)
+        if chart:
+            await context.bot.send_photo(
+                chat_id=query.message.chat_id,
+                photo=chart,
+                caption="👥 نمودار رشد کاربران (30 روز اخیر)"
+            )
+            await query.message.reply_text("نمودار ارسال شد", reply_markup=admin_charts_keyboard())
+        else:
+            await query.edit_message_text(
+                "❌ داده کافی برای نمودار وجود ندارد",
+                reply_markup=admin_charts_keyboard()
+            )
+    
+    elif query.data == "admin_db":
+        db_size = get_db_size()
+        conn = sqlite3.connect('gold_bot.db')
+        c = conn.cursor()
+        c.execute('SELECT COUNT(*) FROM price_history')
+        total_records = c.fetchone()[0]
+        c.execute('''SELECT COUNT(*) FROM price_history 
+                     WHERE timestamp < datetime('now', '-30 days')''')
+        old_records = c.fetchone()[0]
+        conn.close()
+        
+        response = (
+            "💾 **مدیریت دیتابیس**\n\n"
+            f"📊 حجم فایل: {db_size:.2f} MB\n"
+            f"📈 کل رکوردها: {total_records}\n"
+            f"🗑 رکوردهای قدیمی‌تر از 30 روز: {old_records}\n\n"
+            "عملیات مورد نظر را انتخاب کنید:"
+        )
+        
+        await query.edit_message_text(response, parse_mode="Markdown", reply_markup=admin_db_keyboard())
+    
+    elif query.data == "db_clean_old":
+        deleted = clear_old_price_history(30)
+        await query.answer(f"✅ {deleted} رکورد پاک شد", show_alert=True)
+        # Refresh the db info
+        await query.answer()
+        await admin_callback_handler(update, context)  # Re-trigger to show updated info
+    
+    elif query.data == "db_info":
+        db_size = get_db_size()
+        conn = sqlite3.connect('gold_bot.db')
+        c = conn.cursor()
+        
+        c.execute('SELECT COUNT(*) FROM users')
+        user_count = c.fetchone()[0]
+        c.execute('SELECT COUNT(*) FROM price_history')
+        price_count = c.fetchone()[0]
+        
+        c.execute('SELECT MIN(timestamp), MAX(timestamp) FROM price_history')
+        date_range = c.fetchone()
+        
+        conn.close()
+        
+        response = (
+            "📊 **اطلاعات دیتابیس**\n\n"
+            f"💾 حجم: {db_size:.2f} MB\n"
+            f"📁 مسیر: gold_bot.db\n\n"
+            f"**جداول:**\n"
+            f"👥 Users: {user_count} رکورد\n"
+            f"💰 Price History: {price_count} رکورد\n\n"
+        )
+        
+        if date_range[0]:
+            response += f"📅 بازه زمانی: {date_range[0]} تا {date_range[1]}"
+        
+        await query.edit_message_text(response, parse_mode="Markdown", reply_markup=admin_db_keyboard())
+    
+    elif query.data == "admin_export":
+        await query.edit_message_text(
+            "📤 **خروجی داده‌ها**\n\nنوع خروجی را انتخاب کنید:",
+            reply_markup=admin_export_keyboard()
+        )
+    
+    elif query.data == "export_users":
+        await query.answer("در حال آماده‌سازی...")
+        csv_data = export_users_to_csv()
+        from io import BytesIO
+        file = BytesIO(csv_data.encode('utf-8'))
+        file.name = f"users_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        
+        await context.bot.send_document(
+            chat_id=query.message.chat_id,
+            document=file,
+            filename=file.name,
+            caption="📊 خروجی لیست کاربران"
+        )
+        await query.message.reply_text("✅ فایل ارسال شد", reply_markup=admin_export_keyboard())
+    
+    elif query.data.startswith("export_prices_"):
+        days = int(query.data.split("_")[-1])
+        await query.answer("در حال آماده‌سازی...")
+        csv_data = export_price_history_to_csv(days)
+        from io import BytesIO
+        file = BytesIO(csv_data.encode('utf-8'))
+        file.name = f"prices_{days}d_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        
+        await context.bot.send_document(
+            chat_id=query.message.chat_id,
+            document=file,
+            filename=file.name,
+            caption=f"💰 خروجی قیمت‌ها ({days} روز اخیر)"
+        )
+        await query.message.reply_text("✅ فایل ارسال شد", reply_markup=admin_export_keyboard())
+    
+    elif query.data == "admin_broadcast_menu":
+        await query.edit_message_text(
+            "📢 **ارسال پیام همگانی**\n\n"
+            "برای ارسال پیام به همه کاربران، از دستور زیر استفاده کنید:\n"
+            "/broadcast",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="admin_menu")]])
+        )
 
 async def admin_broadcast_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
@@ -682,6 +1201,7 @@ def main():
     app.add_handler(CommandHandler("help", lambda u, c: help_menu(u, c)))
     
     # Admin commands
+    app.add_handler(CommandHandler("admin", lambda u, c: admin_menu(u, c)))
     app.add_handler(CommandHandler("stats", admin_stats))
     app.add_handler(ConversationHandler(
         entry_points=[CommandHandler("broadcast", admin_broadcast_start)],
