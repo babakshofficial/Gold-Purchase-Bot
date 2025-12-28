@@ -1789,26 +1789,35 @@ async def monitor_prices(context: ContextTypes.DEFAULT_TYPE):
     try:
         # Fetch gold and USD data (will check multiple posts if needed)
         tala, ounce = fetch_and_parse_gold()
-        usd_toman = fetch_and_parse_usd()
+        usd_toman = fetch_and_parse_usd() # Ensure this returns Toman
+
+        # Log raw values for debugging price difference issue
+        logger.info(f"Monitor Prices - Fetched Raw Tala: {tala}, Raw USD (Toman): {usd_toman}, Raw Ounce: {ounce}")
 
         # Get all users with notifications enabled
         all_users = get_all_users_with_notifications()
 
         for user_tuple in all_users:
             user_id, flags, buy_thresh, wait_thresh = user_tuple
+            # Log user-specific thresholds for debugging
+            logger.debug(f"Monitor Prices - Checking user {user_id} with thresholds Buy: {buy_thresh}, Wait: {wait_thresh} (in Toman)")
+
             fair, var, verdict, emoji, status = analyze_market(
-                tala, usd_toman, ounce,
-                buy_thresh,
-                wait_thresh
+                tala, usd_toman, ounce, # Pass Toman values
+                buy_thresh, # Thresholds are in Toman
+                wait_thresh  # Thresholds are in Toman
             )
+
+            # Log calculated values for debugging
+            logger.debug(f"Monitor Prices - User {user_id}: Calculated Fair: {fair:.2f}, Diff (Var): {var:.2f}, Status: {status}")
 
             # Check notification flags
             if flags & NOTIF_BUY and status == "BUY":
                 alert_msg = (
                     f"🔔 **هشدار خرید!**\n"
                     f"{verdict}\n"
-                    f"📊 اختلاف قیمت: {int(var):,} تومان\n"
-                    f"🏷 قیمت بازار: {tala:,} تومان\n"
+                    f"📊 اختلاف قیمت: {int(var):,} تومان\n"  # var is in Toman
+                    f"🏷 قیمت بازار: {tala:,} تومان\n"      # tala is in Toman
                     "برای جزئیات بیشتر /gold را بزنید"
                 )
                 try:
@@ -1817,6 +1826,7 @@ async def monitor_prices(context: ContextTypes.DEFAULT_TYPE):
                         text=alert_msg,
                         parse_mode="Markdown"
                     )
+                    logger.info(f"BUY Alert sent to user {user_id}")
                     await asyncio.sleep(0.05)
                 except Exception as e:
                     logger.warning(f"Alert send failed for user {user_id}: {e}")
@@ -1825,8 +1835,8 @@ async def monitor_prices(context: ContextTypes.DEFAULT_TYPE):
                 alert_msg = (
                     f"🔔 **هشدار فروش!**\n"
                     f"{verdict}\n"
-                    f"📊 اختلاف قیمت: {int(var):,} تومان\n"
-                    f"🏷 قیمت بازار: {tala:,} تومان\n"
+                    f"📊 اختلاف قیمت: {int(var):,} تومان\n"  # var is in Toman
+                    f"🏷 قیمت بازار: {tala:,} تومان\n"      # tala is in Toman
                     "برای جزئیات بیشتر /gold را بزنید"
                 )
                 try:
@@ -1835,19 +1845,17 @@ async def monitor_prices(context: ContextTypes.DEFAULT_TYPE):
                         text=alert_msg,
                         parse_mode="Markdown"
                     )
+                    logger.info(f"SELL Alert sent to user {user_id}")
                     await asyncio.sleep(0.05)
                 except Exception as e:
                     logger.warning(f"Alert send failed for user {user_id}: {e}")
 
-            # Example: Significant move (e.g., difference changed by more than 200,000 Toman in last check)
-            # This requires storing the last checked difference per user, which is complex.
-            # A simpler version: alert if difference is far from thresholds (e.g., > 700,000 or < -100,000)
             if flags & NOTIF_SIGNIFICANT_MOVE:
-                if abs(var) > 700000 or var < -100000: # Example thresholds
+                if abs(var) > 700000 or var < -100000: # Example thresholds in Toman
                     alert_msg = (
                         f"🔔 **حرکت قیمت مهم!**\n"
-                        f"📊 اختلاف قیمت: {int(var):,} تومان\n"
-                        f"🏷 قیمت بازار: {tala:,} تومان\n"
+                        f"📊 اختلاف قیمت: {int(var):,} تومان\n"  # var is in Toman
+                        f"🏷 قیمت بازار: {tala:,} تومان\n"      # tala is in Toman
                         "برای جزئیات بیشتر /gold را بزنید"
                     )
                     try:
@@ -1856,6 +1864,7 @@ async def monitor_prices(context: ContextTypes.DEFAULT_TYPE):
                             text=alert_msg,
                             parse_mode="Markdown"
                         )
+                        logger.info(f"SIGNIFICANT MOVE Alert sent to user {user_id}")
                         await asyncio.sleep(0.05)
                     except Exception as e:
                         logger.warning(f"Alert send failed for user {user_id}: {e}")
