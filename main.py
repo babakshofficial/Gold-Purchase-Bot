@@ -1,3 +1,4 @@
+# main.py (Updated sections)
 import re
 import os
 import logging
@@ -6,6 +7,7 @@ import asyncio
 import sqlite3
 from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
+from telegram.helpers import escape_markdown
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -19,13 +21,14 @@ from telegram.ext import (
 import matplotlib
 matplotlib.use('Agg') # Use non-interactive backend
 import matplotlib.pyplot as plt
-import matplotlib.font_manager as fm
-# Try to set a font that supports Persian
-plt.rcParams['font.family'] = ['DejaVu Sans', 'Arial Unicode MS', 'Liberation Sans'] # Fallback fonts
-# If you have a specific Persian font installed, you can try:
-# plt.rcParams['font.family'] = ['Vazir', 'Tahoma'] # Example Persian fonts
+# Try to set a font that is more likely available in cloud environments
+plt.rcParams['font.family'] = ['DejaVu Sans'] # A common default font in matplotlib
+# If Persian text still doesn't show correctly, you might need to bundle a font file
+# and load it explicitly using matplotlib.font_manager.FontProperties
 from io import BytesIO
 import numpy as np # For technical indicators - Ensure this is installed: pip install numpy
+from telegram.helpers import escape_markdown # Import for audit log fix
+
 # ================= LOGGING =================
 logging.basicConfig(
     level=logging.INFO,
@@ -52,7 +55,7 @@ ASK_DB_ACTION = 3
 ASK_EXPORT_DAYS = 4
 ASK_THRESHOLD_TYPE = 5 # New for setting thresholds
 ASK_THRESHOLD_VALUE = 6 # New for setting thresholds
-# Trend Analysis Config
+# Trend Analysis Config (Bot now gets this from DB)
 TREND_HOURS = 6 # Hours to look back for trend analysis
 # Notification Types
 NOTIF_BUY = 1
@@ -75,7 +78,7 @@ def init_db():
         wait_threshold INTEGER DEFAULT {DEFAULT_WAIT_THRESHOLD},
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )''')
-    # Price history table
+    # Price history table - Added source, rsi, volatility, trend columns
     c.execute('''CREATE TABLE IF NOT EXISTS price_history (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -83,7 +86,11 @@ def init_db():
         usd_price REAL,
         ounce_price REAL,
         fair_price REAL,
-        difference REAL
+        difference REAL,
+        source TEXT DEFAULT 'unknown', -- 'crawler' or 'bot'
+        rsi REAL,
+        volatility REAL,
+        trend TEXT -- e.g., 'UPWARD', 'DOWNWARD', 'FLAT'
     )''')
     conn.commit()
     conn.close()
@@ -143,31 +150,65 @@ def update_user_settings(user_id, notifications=None, notification_flags=None, b
     conn.commit()
     conn.close()
 
-def save_price_history(tala, usd, ounce, fair, diff):
+def save_price_history(tala, usd, ounce, fair, diff, source='bot'):
+    """Save price data with source identifier"""
     conn = sqlite3.connect('gold_bot.db')
     c = conn.cursor()
-    c.execute('''INSERT INTO price_history (tala_price, usd_price, ounce_price, fair_price, difference)
-                 VALUES (?, ?, ?, ?, ?)''', (tala, usd, ounce, fair, diff))
+    # For 'bot' entries, rsi, volatility, trend might be calculated differently or left NULL if not applicable for that specific fetch
+    # For now, let's set them to NULL for 'bot' source entries
+    c.execute('''INSERT INTO price_history (tala_price, usd_price, ounce_price, fair_price, difference, source, rsi, volatility, trend)
+                 VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL)''', (tala, usd, ounce, fair, diff, source))
     conn.commit()
     conn.close()
 
 def get_price_history(limit=24):
     conn = sqlite3.connect('gold_bot.db')
     c = conn.cursor()
+    # Get the latest N entries, ordered by timestamp descending
     c.execute('''SELECT timestamp, tala_price, fair_price, difference
                  FROM price_history ORDER BY timestamp DESC LIMIT ?''', (limit,))
     results = c.fetchall()
     conn.close()
-    return results[::-1]  # Reverse to get chronological order
+    # Reverse to get chronological order (oldest first)
+    return results[::-1]
 
-def get_price_history_by_timeframe(hours=24):
-    """Get price history for the last N hours"""
+def get_price_history_for_analysis_bot(hours=TREND_HOURS):
+    """Get price history for the last N hours from the database (for bot analysis) - prioritizes 'crawler' data"""
+    conn = sqlite3.connect('gold_bot.db')
+    c = conn.cursor()
+    # Format the SQL string correctly using .format()
+    sql_query = '''SELECT rsi, volatility, trend, timestamp
+                   FROM price_history
+                   WHERE timestamp >= datetime('now', '-{} hours')
+                   AND source = 'crawler'
+                   ORDER BY timestamp DESC LIMIT 1'''.format(hours)
+    logger.debug(f"Bot analysis query: {sql_query}") # Log the query to verify
+    try:
+        c.execute(sql_query) # Execute the formatted query
+        latest_crawler_analysis = c.fetchone()
+    except sqlite3.Error as e:
+        logger.error(f"Database query error in get_price_history_for_analysis_bot: {e}")
+        latest_crawler_analysis = None
+    conn.close()
+
+    if latest_crawler_analysis:
+        # If crawler data is recent enough, return it
+        rsi, volatility, trend, timestamp = latest_crawler_analysis
+        logger.info(f"Bot analysis: Using crawler data from {timestamp}")
+        return {"trend": trend, "rsi": rsi, "volatility": volatility}
+    else:
+        # If no recent crawler data, return N/A
+        logger.info("Bot analysis: No recent crawler data found, using N/A")
+        return {"trend": "N/A", "rsi": "N/A", "volatility": "N/A"}
+
+def get_price_history_by_timeframe(start_time, end_time):
+    """Get price history for a specific time range from the database"""
     conn = sqlite3.connect('gold_bot.db')
     c = conn.cursor()
     c.execute('''SELECT timestamp, tala_price, fair_price, difference
                  FROM price_history
-                 WHERE timestamp >= datetime('now', '-{} hours')
-                 ORDER BY timestamp ASC'''.format(hours))
+                 WHERE timestamp BETWEEN ? AND ?
+                 ORDER BY timestamp ASC''', (start_time, end_time))
     results = c.fetchall()
     conn.close()
     return results
@@ -211,16 +252,16 @@ def get_price_stats():
     """Get price statistics"""
     conn = sqlite3.connect('gold_bot.db')
     c = conn.cursor()
-    # Latest price
-    c.execute('''SELECT tala_price, fair_price, difference, timestamp
+    # Latest price (from any source)
+    c.execute('''SELECT tala_price, fair_price, difference, timestamp, source
                  FROM price_history ORDER BY timestamp DESC LIMIT 1''')
     latest = c.fetchone()
-    # Average prices last 24 hours
+    # Average prices last 24 hours (from any source)
     c.execute('''SELECT AVG(tala_price), AVG(fair_price), AVG(difference)
                  FROM price_history
                  WHERE timestamp >= datetime('now', '-1 day')''')
     avg_24h = c.fetchone()
-    # Min/Max last 24 hours
+    # Min/Max last 24 hours (from any source)
     c.execute('''SELECT MIN(tala_price), MAX(tala_price)
                  FROM price_history
                  WHERE timestamp >= datetime('now', '-1 day')''')
@@ -249,13 +290,13 @@ def export_price_history_to_csv(days=7):
     """Export price history to CSV format"""
     conn = sqlite3.connect('gold_bot.db')
     c = conn.cursor()
-    c.execute('''SELECT timestamp, tala_price, usd_price, ounce_price, fair_price, difference
+    c.execute('''SELECT timestamp, tala_price, usd_price, ounce_price, fair_price, difference, source
                  FROM price_history
                  WHERE timestamp >= datetime('now', '-' || ? || ' days')
                  ORDER BY timestamp DESC''', (days,))
     prices = c.fetchall()
     conn.close()
-    csv_content = "timestamp,tala_price,usd_price,ounce_price,fair_price,difference\n"
+    csv_content = "timestamp,tala_price,usd_price,ounce_price,fair_price,difference,source\n"
     for price in prices:
         csv_content += ",".join(str(x) for x in price) + "\n"
     return csv_content
@@ -383,56 +424,13 @@ def analyze_market(tala, usd_toman, ounce, buy_threshold, wait_threshold):
         status = "SELL"
     return fair_price, var, verdict, emoji, status
 
-def analyze_trend_and_indicators():
-    """Analyze price trend and calculate technical indicators"""
-    # Get data for the last N hours
-    history = get_price_history_by_timeframe(TREND_HOURS)
-    if len(history) < 2:
-        return {"trend": "N/A", "slope": 0, "rsi": "N/A", "volatility": "N/A"}
-
-    timestamps = [datetime.fromisoformat(h[0]) for h in history]
-    differences = [h[3] for h in history] # Use difference (var) for trend analysis
-
-    # Calculate trend (simple linear regression slope)
-    x = np.arange(len(differences))
-    y = np.array(differences)
-    slope, _ = np.polyfit(x, y, 1)
-
-    # Calculate RSI (Relative Strength Index) - Simplified 14-period
-    rsi = "N/A"
-    if len(differences) >= 14:
-        deltas = np.diff(differences[-14:])
-        gains = deltas[deltas > 0]
-        losses = -deltas[deltas < 0]
-        avg_gain = gains.mean() if len(gains) > 0 else 0
-        avg_loss = losses.mean() if len(losses) > 0 else 0
-        if avg_loss != 0:
-            rs = avg_gain / avg_loss
-            rsi = 100 - (100 / (1 + rs))
-        else:
-            rsi = 100 if avg_gain > 0 else 0
-
-    # Calculate Volatility (std of differences over the period)
-    volatility = np.std(differences)
-
-    # Determine trend direction based on slope
-    if slope > 100: # Threshold for "strong" trend
-        trend = "UPWARD"
-    elif slope < -100:
-        trend = "DOWNWARD"
-    else:
-        trend = "FLAT"
-
-    return {
-        "trend": trend,
-        "slope": slope,
-        "rsi": round(rsi, 2) if rsi != "N/A" else "N/A",
-        "volatility": round(volatility, 2)
-    }
-
+# --- CHART FUNCTIONS WITH ENGLISH LABELS (Updated to fetch from DB) ---
 def generate_price_chart():
-    """Generate price comparison chart"""
-    history = get_price_history(limit=24)
+    """Generate price comparison chart with English labels, fetching data from DB (last 24 hours)"""
+    # Calculate time range
+    end_time = datetime.now()
+    start_time = end_time - timedelta(hours=24)
+    history = get_price_history_by_timeframe(start_time.isoformat(), end_time.isoformat())
     if len(history) < 2:
         return None
 
@@ -441,12 +439,12 @@ def generate_price_chart():
     fair_prices = [h[2] for h in history]
 
     plt.figure(figsize=(10, 6))
-    plt.plot(timestamps, tala_prices, label='قیمت بازار', marker='o', linewidth=2)
-    plt.plot(timestamps, fair_prices, label='قیمت منصفانه', marker='s', linewidth=2, linestyle='--')
+    plt.plot(timestamps, tala_prices, label='Market Price', marker='o', linewidth=2)
+    plt.plot(timestamps, fair_prices, label='Fair Price', marker='s', linewidth=2, linestyle='--')
 
-    plt.xlabel('زمان')
-    plt.ylabel('قیمت (تومان)')
-    plt.title('مقایسه قیمت طلا')
+    plt.xlabel('Time')
+    plt.ylabel('Price (Toman)')
+    plt.title('Gold Price Comparison (Last 24 Hours)')
     plt.legend()
     plt.grid(True, alpha=0.3)
     plt.xticks(rotation=45)
@@ -459,7 +457,7 @@ def generate_price_chart():
     return buf
 
 def generate_user_growth_chart(days=30):
-    """Generate user growth chart"""
+    """Generate user growth chart with English labels"""
     conn = sqlite3.connect('gold_bot.db')
     c = conn.cursor()
     c.execute('''SELECT DATE(created_at) as date, COUNT(*) as count
@@ -486,9 +484,9 @@ def generate_user_growth_chart(days=30):
     plt.plot(dates, cumulative, marker='o', linewidth=2, color='#2196F3')
     plt.fill_between(dates, cumulative, alpha=0.3, color='#2196F3')
 
-    plt.xlabel('تاریخ')
-    plt.ylabel('تعداد کاربران')
-    plt.title(f'رشد کاربران ({days} روز اخیر)')
+    plt.xlabel('Date')
+    plt.ylabel('Number of Users')
+    plt.title(f'User Growth ({days} Days Ago)')
     plt.grid(True, alpha=0.3)
     plt.xticks(rotation=45)
     plt.tight_layout()
@@ -500,21 +498,16 @@ def generate_user_growth_chart(days=30):
     return buf
 
 def generate_price_difference_chart(days=7):
-    """Generate price difference trend chart"""
-    conn = sqlite3.connect('gold_bot.db')
-    c = conn.cursor()
-    c.execute('''SELECT timestamp, difference
-                 FROM price_history
-                 WHERE timestamp >= datetime('now', '-' || ? || ' days')
-                 ORDER BY timestamp''', (days,))
-    data = c.fetchall()
-    conn.close()
-
-    if len(data) < 2:
+    """Generate price difference trend chart with English labels, fetching data from DB"""
+    # Calculate time range
+    end_time = datetime.now()
+    start_time = end_time - timedelta(days=days)
+    history = get_price_history_by_timeframe(start_time.isoformat(), end_time.isoformat())
+    if len(history) < 2:
         return None
 
-    timestamps = [datetime.fromisoformat(d[0]) for d in data]
-    differences = [d[1] for d in data]
+    timestamps = [datetime.fromisoformat(h[0]) for h in history]
+    differences = [h[3] for h in history] # Use difference (var)
 
     # Color code based on thresholds
     colors = []
@@ -531,12 +524,12 @@ def generate_price_difference_chart(days=7):
     plt.plot(timestamps, differences, linewidth=1, alpha=0.5, color='gray')
 
     # Add threshold lines
-    plt.axhline(y=DEFAULT_BUY_THRESHOLD, color='green', linestyle='--', label='آستانه خرید', alpha=0.7)
-    plt.axhline(y=DEFAULT_WAIT_THRESHOLD, color='red', linestyle='--', label='آستانه فروش', alpha=0.7)
+    plt.axhline(y=DEFAULT_BUY_THRESHOLD, color='green', linestyle='--', label='Buy Threshold', alpha=0.7)
+    plt.axhline(y=DEFAULT_WAIT_THRESHOLD, color='red', linestyle='--', label='Sell Threshold', alpha=0.7)
 
-    plt.xlabel('زمان')
-    plt.ylabel('اختلاف قیمت (تومان)')
-    plt.title(f'روند اختلاف قیمت ({days} روز اخیر)')
+    plt.xlabel('Time')
+    plt.ylabel('Price Difference (Toman)')
+    plt.title(f'Price Difference Trend ({days} Days Ago)')
     plt.legend()
     plt.grid(True, alpha=0.3)
     plt.xticks(rotation=45)
@@ -549,30 +542,32 @@ def generate_price_difference_chart(days=7):
     return buf
 
 def generate_detailed_history_chart(start_time, end_time):
-    """Generate a chart for a specific time period"""
-    conn = sqlite3.connect('gold_bot.db')
-    c = conn.cursor()
-    c.execute('''SELECT timestamp, tala_price, fair_price, difference
-                 FROM price_history
-                 WHERE timestamp BETWEEN ? AND ?
-                 ORDER BY timestamp ASC''', (start_time, end_time))
-    data = c.fetchall()
-    conn.close()
+    """Generate a chart for a specific time period with English labels, fetching data from DB"""
+    # Ensure inputs are datetime objects for comparison, but pass ISO format strings to DB query
+    if isinstance(start_time, str):
+        start_time_dt = datetime.fromisoformat(start_time)
+    else:
+        start_time_dt = start_time
+    if isinstance(end_time, str):
+        end_time_dt = datetime.fromisoformat(end_time)
+    else:
+        end_time_dt = end_time
 
-    if len(data) < 2:
+    history = get_price_history_by_timeframe(start_time_dt.isoformat(), end_time_dt.isoformat())
+    if len(history) < 2:
         return None
 
-    timestamps = [datetime.fromisoformat(h[0]) for h in data]
-    tala_prices = [h[1] for h in data]
-    fair_prices = [h[2] for h in data]
-    differences = [h[3] for h in data]
+    timestamps = [datetime.fromisoformat(h[0]) for h in history]
+    tala_prices = [h[1] for h in history]
+    fair_prices = [h[2] for h in history]
+    differences = [h[3] for h in history]
 
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
 
-    ax1.plot(timestamps, tala_prices, label='قیمت بازار', marker='o', linewidth=2)
-    ax1.plot(timestamps, fair_prices, label='قیمت منصفانه', marker='s', linewidth=2, linestyle='--')
-    ax1.set_ylabel('قیمت (تومان)')
-    ax1.set_title('تاریخچه قیمت')
+    ax1.plot(timestamps, tala_prices, label='Market Price', marker='o', linewidth=2)
+    ax1.plot(timestamps, fair_prices, label='Fair Price', marker='s', linewidth=2, linestyle='--')
+    ax1.set_ylabel('Price (Toman)')
+    ax1.set_title('Price History')
     ax1.legend()
     ax1.grid(True, alpha=0.3)
 
@@ -588,11 +583,11 @@ def generate_detailed_history_chart(start_time, end_time):
 
     ax2.scatter(timestamps, differences, c=colors, s=50, alpha=0.6)
     ax2.plot(timestamps, differences, linewidth=1, alpha=0.5, color='gray')
-    ax2.axhline(y=DEFAULT_BUY_THRESHOLD, color='green', linestyle='--', label='آستانه خرید', alpha=0.7)
-    ax2.axhline(y=DEFAULT_WAIT_THRESHOLD, color='red', linestyle='--', label='آستانه فروش', alpha=0.7)
-    ax2.set_ylabel('اختلاف قیمت (تومان)')
-    ax2.set_xlabel('زمان')
-    ax2.set_title('تاریخچه اختلاف قیمت')
+    ax2.axhline(y=DEFAULT_BUY_THRESHOLD, color='green', linestyle='--', label='Buy Threshold', alpha=0.7)
+    ax2.axhline(y=DEFAULT_WAIT_THRESHOLD, color='red', linestyle='--', label='Sell Threshold', alpha=0.7)
+    ax2.set_ylabel('Price Difference (Toman)')
+    ax2.set_xlabel('Time')
+    ax2.set_title('Price Difference History')
     ax2.legend()
     ax2.grid(True, alpha=0.3)
 
@@ -623,14 +618,18 @@ async def audit_log(context: ContextTypes.DEFAULT_TYPE, user_id, username, comma
     if len(response_summary) > max_msg_length:
         response_summary = response_summary[:max_msg_length] + "... (truncated)"
 
+    # Escape special markdown characters in command and response_summary
+    escaped_command = escape_markdown(command, version=2) # Use version 2 for common markdown
+    escaped_response_summary = escape_markdown(response_summary, version=2)
+
     # Build the message in parts to avoid unterminated string literal
     msg_part1 = (
         f"📨 **Interaction Log**\n"
-        f"👤 User: {username_display} (`{user_id}`)\n"
+        f"👤 User: {escape_markdown(username_display, version=2)} (`{user_id}`)\n"
         f"⏰ Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
     )
-    msg_part2 = f"📥 **Command:** `{command}`\n"
-    msg_part3 = f"📤 **Response Summary:** {response_summary[:1000]}"  # Limit bot response to prevent overflow
+    msg_part2 = f"📥 **Command/Action:** `{escaped_command}`\n"
+    msg_part3 = f"📤 **Response Summary:** {escaped_response_summary[:1000]}"  # Limit bot response to prevent overflow
 
     msg = msg_part1 + msg_part2 + msg_part3
 
@@ -638,11 +637,11 @@ async def audit_log(context: ContextTypes.DEFAULT_TYPE, user_id, username, comma
         await context.bot.send_message(
             chat_id=PRIVATE_CHANNEL_ID,
             text=msg,
-            parse_mode="Markdown"
+            parse_mode="MarkdownV2" # Use MarkdownV2 for better escaping support
         )
         logger.info(f"Audit log sent for user {user_id}")
     except Exception as e:
-        logger.error(f"Audit send failed for user {user.id}: {e}")
+        logger.error(f"Audit send failed for user {user_id}: {e}")
         # Try sending without markdown as fallback
         try:
             simple_msg_part1 = (
@@ -650,7 +649,7 @@ async def audit_log(context: ContextTypes.DEFAULT_TYPE, user_id, username, comma
                 f"User: {username_display} ({user_id})\n"
                 f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
             )
-            simple_msg_part2 = f"Command: {command[:500]}\n"
+            simple_msg_part2 = f"Command/Action: {command[:500]}\n"
             simple_msg_part3 = f"Response Summary: {response_summary[:500]}"
 
             simple_msg = simple_msg_part1 + simple_msg_part2 + simple_msg_part3
@@ -671,6 +670,7 @@ def main_menu_keyboard():
          InlineKeyboardButton("📈 نمودار قیمت", callback_data="chart")],
         [InlineKeyboardButton("🔍 تاریخچه قیمت", callback_data="history_menu"),
          InlineKeyboardButton("⚙️ تنظیمات", callback_data="settings")],
+        [InlineKeyboardButton("ℹ️ درباره ما", callback_data="about_us")], # Added About Us button
         [InlineKeyboardButton("ℹ️ راهنما", callback_data="help")]
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -736,7 +736,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def gold_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE, query=None):
     if query:
         user = query.from_user
-        user_msg = "Callback: gold_analysis"
+        user_msg = f"Callback: {query.data}" # Changed to query.data for button press
         # Show processing message
         await query.edit_message_text("⏳ در حال دریافت اطلاعات...")
     else:
@@ -747,9 +747,9 @@ async def gold_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE, quer
 
     settings = get_user_settings(user.id)
     try:
-        # Fetch gold data (will check multiple posts if needed)
+        # Fetch gold data (will check multiple posts if needed) - REAL-TIME
         tala, ounce = fetch_and_parse_gold()
-        # Fetch USD data (will check multiple posts if needed)
+        # Fetch USD data (will check multiple posts if needed) - REAL-TIME
         usd_toman = fetch_and_parse_usd()
         fair, var, verdict, emoji, status = analyze_market(
             tala, usd_toman, ounce,
@@ -757,11 +757,16 @@ async def gold_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE, quer
             settings['wait_threshold']
         )
 
-        # Analyze trend and indicators
-        trend_info = analyze_trend_and_indicators()
+        # Get trend/RSI/volatility from DATABASE - ANALYZED DATA
+        trend_info = get_price_history_for_analysis_bot(TREND_HOURS)
 
-        # Save to history
-        save_price_history(tala, usd_toman, ounce, fair, var)
+        # Save the real-time data fetched by the bot with source 'bot'
+        save_price_history(tala, usd_toman, ounce, fair, var, source='bot')
+
+        # Prepare trend info for the response string, handling potential N/A values
+        trend_str = trend_info.get('trend', 'N/A')
+        rsi_str = trend_info.get('rsi', 'N/A')
+        volatility_str = trend_info.get('volatility', 'N/A')
 
         response = (
             f"{emoji} **تحلیل بازار طلا**\n"
@@ -771,11 +776,11 @@ async def gold_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE, quer
             f"📊 قیمت بازار (مثقال): {int(tala * 4.6):,} تومان\n"
             f"⚖️ قیمت منصفانه: {int(fair):,} تومان\n"
             f"📉 اختلاف قیمت: {int(var):,} تومان\n"
-            f"📈 **تحلیل روند ({TREND_HOURS} ساعت گذشته):** {trend_info['trend']} (شیب: {trend_info['slope']:.2f})\n"
-            f"📊 **شاخص RSI:** {trend_info['rsi']}\n"
-            f"📉 **نوسانات:** {trend_info['volatility']:.2f}\n"
+            f"📈 **تحلیل روند ({TREND_HOURS} ساعت گذشته - از دیتابیس):** {trend_str}\n"
+            f"📊 **شاخص RSI (از دیتابیس):** {rsi_str}\n"
+            f"📉 **نوسانات (از دیتابیس):** {volatility_str}\n"
             f"{verdict}\n"
-            "👤 Bot creator: @b4bak"
+            # Removed: "👤 Bot creator: @b4bak"
         )
 
         if query:
@@ -785,7 +790,7 @@ async def gold_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE, quer
 
         # Audit log with proper error handling
         try:
-            await audit_log(context, user.id, user.username, user_msg, f"Gold analysis: {status}, Trend: {trend_info['trend']}")
+            await audit_log(context, user.id, user.username, user_msg, f"Gold analysis: {status}, Trend: {trend_str}")
         except Exception as e:
             logger.error(f"Failed to log gold_analysis for user {user.id}: {e}")
 
@@ -800,9 +805,11 @@ async def gold_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE, quer
 async def show_chart(update: Update, context: ContextTypes.DEFAULT_TYPE, query=None):
     if query:
         user = query.from_user
+        user_msg = f"Callback: {query.data}" # Changed to query.data for button press
         await query.answer("در حال تولید نمودار...")
     else:
         user = update.effective_user
+        user_msg = "Command: /chart" # Changed to command name
 
     try:
         chart = generate_price_chart()
@@ -826,7 +833,7 @@ async def show_chart(update: Update, context: ContextTypes.DEFAULT_TYPE, query=N
 
         # Audit log with proper error handling
         try:
-            await audit_log(context, user.id, user.username, "chart" if query else update.message.text, "Chart sent successfully")
+            await audit_log(context, user.id, user.username, user_msg, "Chart sent successfully")
         except Exception as e:
             logger.error(f"Failed to log show_chart for user {user.id}: {e}")
 
@@ -841,9 +848,11 @@ async def show_chart(update: Update, context: ContextTypes.DEFAULT_TYPE, query=N
 async def show_history_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, query=None):
     if query:
         user = query.from_user
+        user_msg = f"Callback: {query.data}" # Changed to query.data for button press
         await query.answer("باز کردن منوی تاریخچه...")
     else:
         user = update.effective_user
+        user_msg = "Command: /history" # Changed to command name
 
     try:
         msg = "🔍 **انتخاب بازه زمانی برای تاریخچه قیمت**"
@@ -854,7 +863,7 @@ async def show_history_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 
         # Audit log
         try:
-            await audit_log(context, user.id, user.username, "history_menu" if query else update.message.text, "History menu opened")
+            await audit_log(context, user.id, user.username, user_msg, "History menu opened")
         except Exception as e:
             logger.error(f"Failed to log show_history_menu for user {user.id}: {e}")
 
@@ -869,9 +878,11 @@ async def show_history_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 async def show_history_chart(update: Update, context: ContextTypes.DEFAULT_TYPE, query=None):
     if query:
         user = query.from_user
+        user_msg = f"Callback: {query.data}" # Changed to query.data for button press
         await query.answer("در حال تولید نمودار تاریخچه...")
     else:
         user = update.effective_user
+        user_msg = f"Command: /history with unknown source" # Fallback if called directly
 
     timeframe = query.data.split('_')[1] if query else None
     if not timeframe:
@@ -925,7 +936,7 @@ async def show_history_chart(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
         # Audit log
         try:
-            await audit_log(context, user.id, user.username, f"history_{timeframe}", f"History chart ({timeframe}) sent successfully")
+            await audit_log(context, user.id, user.username, user_msg, f"History chart ({timeframe}) sent successfully")
         except Exception as e:
             logger.error(f"Failed to log show_history_chart for user {user.id}: {e}")
 
@@ -941,8 +952,10 @@ async def show_history_chart(update: Update, context: ContextTypes.DEFAULT_TYPE,
 async def settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, query=None):
     if query:
         user = query.from_user
+        user_msg = f"Callback: {query.data}" # Changed to query.data for button press
     else:
         user = update.effective_user
+        user_msg = "Command: /settings" # Changed to command name
     settings = get_user_settings(user.id)
     response = (
         "⚙️ **تنظیمات شما**\n"
@@ -968,6 +981,12 @@ async def settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, quer
             parse_mode="Markdown",
             reply_markup=settings_menu_keyboard(settings['notifications'], settings['notification_flags'])
         )
+
+    # Audit log for settings access
+    try:
+        await audit_log(context, user.id, user.username, user_msg, f"Settings accessed. Notifications: {settings['notifications']}, Buy Thresh: {settings['buy_threshold']}, Sell Thresh: {settings['wait_threshold']}")
+    except Exception as e:
+        logger.error(f"Failed to log settings_menu for user {user.id}: {e}")
 
 async def toggle_notifications(query, user_id):
     settings = get_user_settings(user_id)
@@ -1033,7 +1052,7 @@ async def set_threshold_value(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(success_msg, reply_markup=main_menu_keyboard())
         # Audit log
         try:
-            await audit_log(context, user.id, user.username, f"set_threshold_{threshold_type}: {value:,}", success_msg)
+            await audit_log(context, user.id, user.username, f"Set threshold {threshold_type} to {value:,}", success_msg)
         except Exception as e:
             logger.error(f"Failed to log set_threshold_value for user {user.id}: {e}")
 
@@ -1048,7 +1067,48 @@ async def set_threshold_value(update: Update, context: ContextTypes.DEFAULT_TYPE
     context.user_data.pop('setting_threshold', None)
     return ConversationHandler.END
 
+async def about_us(update: Update, context: ContextTypes.DEFAULT_TYPE, query=None):
+    # Debug: Print raw values
+    print(f"DEBUG: Raw USD_CHANNEL_USERNAME = '{USD_CHANNEL_USERNAME}', Raw GOLD_CHANNEL_USERNAME = '{GOLD_CHANNEL_USERNAME}'")
+
+    # Escape the channel names for MarkdownV2
+    usd_channel_escaped = escape_markdown(USD_CHANNEL_USERNAME, version=2)
+    gold_channel_escaped = escape_markdown(GOLD_CHANNEL_USERNAME, version=2)
+
+    # Debug: Print escaped values
+    print(f"DEBUG: Escaped USD_CHANNEL_USERNAME = '{usd_channel_escaped}', Escaped GOLD_CHANNEL_USERNAME = '{gold_channel_escaped}'")
+
+    response = (
+        "ℹ️ **درباره ما**\n"
+        "این ربات برای تحلیل قیمت طلا طراحی شده است.\n\n"
+        "**منابع قیمت:**\n"
+        f"• دلار آزاد: @{usd_channel_escaped}\n"  # Use the escaped variable
+        f"• اونس جهانی و طلا: @{gold_channel_escaped}\n\n"  # Use the escaped variable
+        "**سازنده ربات:**\n"
+        "@b4bak"
+    )
+    if query:
+        user = query.from_user
+        user_msg = f"Callback: {query.data}"
+        # Use MarkdownV2 for consistency with audit log
+        await query.edit_message_text(response, parse_mode="MarkdownV2", reply_markup=main_menu_keyboard())
+        # Audit log for button press
+        await audit_log(context, user.id, user.username, user_msg, "About Us section accessed via button")
+    else:
+        user = update.effective_user
+        user_msg = "/about"
+        # Use MarkdownV2 for consistency with audit log
+        await update.message.reply_text(response, parse_mode="MarkdownV2", reply_markup=main_menu_keyboard())
+        # Audit log for command
+        await audit_log(context, user.id, user.username, user_msg, "About Us section accessed via /about command")
+
 async def help_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, query=None):
+    if query:
+        user = query.from_user
+        user_msg = f"Callback: {query.data}" # Changed to query.data for button press
+    else:
+        user = update.effective_user
+        user_msg = "Command: /help" # Changed to command name
     response = (
         "📚 **راهنمای استفاده**\n"
         "**دستورات:**\n"
@@ -1058,26 +1118,42 @@ async def help_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, query=No
         "/settings - تنظیمات\n"
         "/calc - محاسبه گرم\n"
         "/history - تاریخچه قیمت\n"
+        "/about - درباره ما\n"  # Added /about
         "\n**ویژگی‌ها:**\n"
         "🔔 دریافت اعلان زمان خرید/فروش/حرکت قیمت\n"
         "📊 تحلیل لحظه‌ای بازار\n"
         "📈 نمودار روند قیمت\n"
         "🔍 تحلیل روند و شاخص‌های تکنیکال\n"
         "⚙️ تنظیمات شخصی‌سازی شده\n"
-        "👤 Bot creator: @b4bak"
+        # Removed: "👤 Bot creator: @b4bak"
     )
     if query:
         await query.edit_message_text(response, parse_mode="Markdown", reply_markup=main_menu_keyboard())
     else:
         await update.message.reply_text(response, parse_mode="Markdown", reply_markup=main_menu_keyboard())
 
+    # Audit log for help access
+    try:
+        await audit_log(context, user.id, user.username, user_msg, "Help menu sent")
+    except Exception as e:
+        logger.error(f"Failed to log help_menu for user {user.id}: {e}")
+
 # ================= CALLBACK HANDLER =================
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    user = query.from_user
+    user_action = f"Callback: {query.data}" # Capture the specific button press
+
     # Check if it's an admin callback
     if query.data.startswith("admin_") or query.data.startswith("chart_") or query.data.startswith("db_") or query.data.startswith("export_"):
+        # Log admin action here before forwarding
+        await audit_log(context, user.id, user.username, user_action, f"Admin action initiated: {query.data}")
         await admin_callback_handler(update, context)
         return
+
+    # Log the button press for non-admin actions
+    await audit_log(context, user.id, user.username, user_action, f"Button '{query.data}' pressed")
+
     await query.answer()
 
     if query.data == "gold":
@@ -1090,6 +1166,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_history_chart(update, context, query)
     elif query.data == "settings":
         await settings_menu(update, context, query)
+    elif query.data == "about_us": # Added handling for about_us button
+        await about_us(update, context, query)
     elif query.data == "help":
         await help_menu(update, context, query)
     elif query.data == "main_menu":
@@ -1120,16 +1198,20 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ================= CALC CONVERSATION =================
 async def calc_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
     context.user_data['waiting_for_calc'] = True
     await update.message.reply_text("💰 مبلغ خود را به تومان وارد کنید:")
+    # Log the start of the calc conversation
+    await audit_log(context, user.id, user.username, "/calc", "Started calc conversation")
     return ASK_AMOUNT
 
 async def calc_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    user_input = update.message.text
     # Show processing message
     processing_msg = await update.message.reply_text("⏳ در حال دریافت اطلاعات...")
     try:
-        money = int(update.message.text.replace(",", ""))
+        money = int(user_input.replace(",", ""))
         # Fetch gold and USD data (will check multiple posts if needed)
         tala, ounce = fetch_and_parse_gold()
         usd_toman = fetch_and_parse_usd()
@@ -1138,18 +1220,20 @@ async def calc_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📊 **محاسبه با {money:,} تومان**\n"
             f"🏷 بازار: {money / tala:.2f} گرم\n"
             f"⚖️ منصفانه: {money / fair_price:.2f} گرم\n"
-            "👤 Bot creator: @b4bak"
+            # Removed: "👤 Bot creator: @b4bak"
         )
         await processing_msg.edit_text(response, parse_mode="Markdown", reply_markup=main_menu_keyboard())
 
         # Audit log with proper error handling
         try:
-            await audit_log(context, user.id, user.username, f"calc: {money:,}", f"Calculation result: {money / fair_price:.2f} grams at fair price")
+            await audit_log(context, user.id, user.username, f"Calc: {money:,}", f"Calculation result: {money / fair_price:.2f} grams at fair price")
         except Exception as e:
             logger.error(f"Failed to log calc_amount for user {user.id}: {e}")
 
     except ValueError:
         await processing_msg.edit_text("❌ عدد معتبر وارد کنید", reply_markup=main_menu_keyboard())
+        # Log the invalid input
+        await audit_log(context, user.id, user.username, f"Calc input: {user_input}", "Invalid number entered for calc")
     except Exception as e:
         logger.exception("Calc failed")
         await processing_msg.edit_text("❌ خطا در دریافت اطلاعات. لطفاً دوباره تلاش کنید.", reply_markup=main_menu_keyboard())
@@ -1159,16 +1243,21 @@ async def calc_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle regular text messages - check if waiting for calc input or threshold value"""
+    """Handle regular text messages - check if waiting for calc input or threshold value, otherwise log as unhandled text"""
+    user = update.effective_user
+    user_text = update.message.text
+
     if context.user_data.get('waiting_for_calc'):
-        # Process as calc amount
+        # Process as calc amount - logging is handled within calc_amount
         return await calc_amount(update, context)
     elif context.user_data.get('setting_threshold'):
-        # Process as threshold value
+        # Process as threshold value - logging is handled within set_threshold_value
         return await set_threshold_value(update, context)
     else:
-        # Ignore other text messages or provide help
-        pass
+        # This is a text message not part of a conversation, log it
+        await audit_log(context, user.id, user.username, f"Text Message: {user_text}", "Received text message outside of a conversation. Ignored.")
+        # Optionally, you could send a default message or guide the user
+        # await update.message.reply_text("❌ دستور نامعتبر. از منو استفاده کنید یا /help را بزنید.")
 
 # ================= ADMIN COMMANDS =================
 def is_admin(user_id):
@@ -1230,8 +1319,10 @@ async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, query=N
     """Show admin main menu"""
     if query:
         user = query.from_user
+        user_msg = f"Callback: {query.data}" # Changed to query.data for button press
     else:
         user = update.effective_user
+        user_msg = "Command: /admin" # Changed to command name
     if not is_admin(user.id):
         if query:
             await query.answer("❌ شما دسترسی ندارید", show_alert=True)
@@ -1248,12 +1339,20 @@ async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, query=N
     else:
         await update.message.reply_text(response, parse_mode="Markdown", reply_markup=admin_keyboard())
 
+    # Audit log for admin access
+    try:
+        await audit_log(context, user.id, user.username, user_msg, f"Admin panel accessed. Admin: {user.id}")
+    except Exception as e:
+        logger.error(f"Failed to log admin_menu for user {user.id}: {e}")
+
 async def admin_health_check(update: Update, context: ContextTypes.DEFAULT_TYPE, query=None):
     """Admin health check command"""
     if query:
         user = query.from_user
+        user_msg = f"Callback: {query.data}" # Changed to query.data for button press
     else:
         user = update.effective_user
+        user_msg = "Command: /health" # Changed to command name
     if not is_admin(user.id):
         if query:
             await query.answer("❌ شما دسترسی ندارید", show_alert=True)
@@ -1297,12 +1396,19 @@ async def admin_health_check(update: Update, context: ContextTypes.DEFAULT_TYPE,
     else:
         await update.message.reply_text(response, parse_mode="Markdown", reply_markup=admin_keyboard())
 
+    # Audit log for health check
+    try:
+        await audit_log(context, user.id, user.username, user_msg, f"Health check performed. Status: {health_status[0]}")
+    except Exception as e:
+        logger.error(f"Failed to log admin_health_check for user {user.id}: {e}")
+
 async def test_audit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Test audit logging - admin only"""
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("❌ شما دسترسی ندارید")
         return
     user = update.effective_user
+    user_msg = "Command: /test_audit" # Changed to command name
     # Check if PRIVATE_CHANNEL_ID is set
     if not PRIVATE_CHANNEL_ID:
         await update.message.reply_text(
@@ -1330,6 +1436,8 @@ async def test_audit(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"پیام با موفقیت به کانال {PRIVATE_CHANNEL_ID} ارسال شد.\n"
             "لاگ‌ها باید کار کنند."
         )
+        # Audit log for test success
+        await audit_log(context, user.id, user.username, user_msg, "Audit log test successful")
     except Exception as e:
         await update.message.reply_text(
             f"❌ **تست ناموفق**\n"
@@ -1341,11 +1449,15 @@ async def test_audit(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "4. برای گرفتن ID کانال، پیامی را forward کنید به @userinfobot",
             parse_mode="Markdown"
         )
+        # Audit log for test failure
+        await audit_log(context, user.id, user.username, user_msg, f"Audit log test failed: {e}")
 
 async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("❌ شما دسترسی ندارید")
         return
+    user = update.effective_user
+    user_msg = "Command: /stats" # Changed to command name
     user_count = get_user_count()
     conn = sqlite3.connect('gold_bot.db')
     c = conn.cursor()
@@ -1363,13 +1475,25 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(response, parse_mode="Markdown", reply_markup=admin_keyboard())
 
+    # Audit log for stats
+    await audit_log(context, user.id, user.username, user_msg, f"Admin stats requested. Users: {user_count}, Active Notifs: {notif_count}, History: {history_count}")
+
 async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle admin panel callbacks"""
     query = update.callback_query
+    user = query.from_user
+    user_action = f"Callback: {query.data}" # Capture the specific admin button press
+
     if not is_admin(query.from_user.id):
         await query.answer("❌ شما دسترسی ندارید", show_alert=True)
+        # Still log unauthorized access attempts
+        await audit_log(context, user.id, user.username, user_action, "Unauthorized admin access attempt")
         return
+
     await query.answer()
+
+    # Log the admin action *after* checking authorization
+    await audit_log(context, user.id, user.username, user_action, f"Admin action: {query.data}")
 
     if query.data == "admin_menu":
         await admin_menu(update, context, query)
@@ -1425,10 +1549,10 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
     elif query.data == "admin_prices":
         stats = get_price_stats()
         if stats['latest']:
-            latest_price, latest_fair, latest_diff, latest_time = stats['latest']
+            latest_price, latest_fair, latest_diff, latest_time, latest_source = stats['latest']
             response = (
                 "💰 **آمار قیمت‌ها**\n"
-                f"**آخرین قیمت:**\n"
+                f"**آخرین قیمت (منبع: {latest_source}):**\n"
                 f"🏷 بازار: {latest_price:,} تومان\n"
                 f"⚖️ منصفانه: {int(latest_fair):,} تومان\n"
                 f"📊 اختلاف: {int(latest_diff):,} تومان\n"
@@ -1622,7 +1746,11 @@ async def admin_broadcast_start(update: Update, context: ContextTypes.DEFAULT_TY
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("❌ شما دسترسی ندارید")
         return ConversationHandler.END
+    user = update.effective_user
+    user_msg = "Command: /broadcast" # Changed to command name
     await update.message.reply_text("📢 پیام خود را برای ارسال به همه کاربران وارد کنید:")
+    # Log the start of the broadcast conversation
+    await audit_log(context, user.id, user.username, user_msg, "Started broadcast conversation")
     return ASK_BROADCAST
 
 async def admin_broadcast_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1651,6 +1779,8 @@ async def admin_broadcast_send(update: Update, context: ContextTypes.DEFAULT_TYP
         f"موفق: {success}\n"
         f"ناموفق: {failed}"
     )
+    # Log the broadcast result
+    await audit_log(context, update.effective_user.id, update.effective_user.username, "Broadcast sent", f"Message: {message[:200]}... Success: {success}, Failed: {failed}")
     return ConversationHandler.END
 
 # ================= PRICE MONITORING =================
@@ -1744,6 +1874,7 @@ def main():
     app.add_handler(CommandHandler("history", lambda u, c: show_history_menu(u, c))) # New command
     app.add_handler(CommandHandler("settings", lambda u, c: settings_menu(u, c)))
     app.add_handler(CommandHandler("help", lambda u, c: help_menu(u, c)))
+    app.add_handler(CommandHandler("about", lambda u, c: about_us(u, c))) # Added /about command
 
     # Admin commands
     app.add_handler(CommandHandler("admin", lambda u, c: admin_menu(u, c)))

@@ -1,4 +1,5 @@
 numpy
+schedule
 requests
 matplotlib
 python-dotenv
