@@ -223,7 +223,7 @@ def main():
             logger.error(f"Crawler failed: {e}")
 
         # Wait for 10 minutes before the next fetch
-        time.sleep(60) # 600 seconds = 10 minutes
+        time.sleep(600) # 600 seconds = 10 minutes
 
 if __name__ == "__main__":
     main()

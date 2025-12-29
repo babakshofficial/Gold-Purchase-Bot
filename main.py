@@ -7,6 +7,7 @@ import asyncio
 import sqlite3
 from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
+import telegram.error
 from telegram.helpers import escape_markdown
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -330,6 +331,14 @@ def normalize(text: str) -> str:
         text = text.replace(arabic[i], str(i))
     return text.replace("٬", ",").replace("،", ",")
 
+def escape_for_markdown_v2(text: str) -> str:
+    if text is None:
+        return ""
+    # Ensure the text is a string
+    text = str(text)
+    # Use the escape_markdown helper from python-telegram-bot
+    return escape_markdown(text, version=2)
+
 def fetch_latest_post(url: str, max_attempts: int = 10) -> str:
     """Fetch latest post with content, checking multiple posts if needed"""
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -608,8 +617,11 @@ async def audit_log(context: ContextTypes.DEFAULT_TYPE, user_id, username, comma
         logger.warning("PRIVATE_CHANNEL_ID not set - skipping audit log")
         return
 
-    # Ensure username is not None
-    username_display = username if username else "No username"
+    # Debug: Log raw values before escaping
+    logger.debug(f"Audit Log Raw Username: '{username}', Raw Command: '{command}', Raw Response Summary: '{response_summary}'")
+
+    # Ensure username is not None and escape it
+    username_display = escape_for_markdown_v2(username if username else "No username")
 
     # Truncate very long messages to avoid Telegram limits
     max_msg_length = 3000
@@ -618,18 +630,21 @@ async def audit_log(context: ContextTypes.DEFAULT_TYPE, user_id, username, comma
     if len(response_summary) > max_msg_length:
         response_summary = response_summary[:max_msg_length] + "... (truncated)"
 
-    # Escape special markdown characters in command and response_summary
-    escaped_command = escape_markdown(command, version=2) # Use version 2 for common markdown
-    escaped_response_summary = escape_markdown(response_summary, version=2)
+    # Escape command and response_summary
+    escaped_command = escape_for_markdown_v2(command)
+    escaped_response_summary = escape_for_markdown_v2(response_summary)
+
+    # Debug: Log escaped values
+    logger.debug(f"Audit Log Escaped Username: '{username_display}', Escaped Command: '{escaped_command}', Escaped Response Summary: '{escaped_response_summary}'")
 
     # Build the message in parts to avoid unterminated string literal
     msg_part1 = (
         f"📨 **Interaction Log**\n"
-        f"👤 User: {escape_markdown(username_display, version=2)} (`{user_id}`)\n"
+        f"👤 User: {username_display} (`{user_id}`)\n" # username_display is already escaped
         f"⏰ Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
     )
-    msg_part2 = f"📥 **Command/Action:** `{escaped_command}`\n"
-    msg_part3 = f"📤 **Response Summary:** {escaped_response_summary[:1000]}"  # Limit bot response to prevent overflow
+    msg_part2 = f"📥 **Command/Action:** `{escaped_command}`\n" # escaped_command is used
+    msg_part3 = f"📤 **Response Summary:** {escaped_response_summary[:1000]}"  # escaped_response_summary is used
 
     msg = msg_part1 + msg_part2 + msg_part3
 
@@ -637,26 +652,23 @@ async def audit_log(context: ContextTypes.DEFAULT_TYPE, user_id, username, comma
         await context.bot.send_message(
             chat_id=PRIVATE_CHANNEL_ID,
             text=msg,
-            parse_mode="MarkdownV2" # Use MarkdownV2 for better escaping support
-        )
+            parse_mode="MarkdownV2")
         logger.info(f"Audit log sent for user {user_id}")
     except Exception as e:
         logger.error(f"Audit send failed for user {user_id}: {e}")
-        # Try sending without markdown as fallback
         try:
             simple_msg_part1 = (
                 f"📨 Interaction Log\n"
-                f"User: {username_display} ({user_id})\n"
+                f"User: {username_display} ({user_id})\n" 
                 f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
             )
-            simple_msg_part2 = f"Command/Action: {command[:500]}\n"
-            simple_msg_part3 = f"Response Summary: {response_summary[:500]}"
-
+            simple_msg_part2 = f"Command/Action: {command[:500]}\n" 
+            simple_msg_part3 = f"Response Summary: {response_summary[:500]}" 
             simple_msg = simple_msg_part1 + simple_msg_part2 + simple_msg_part3
 
             await context.bot.send_message(
                 chat_id=PRIVATE_CHANNEL_ID,
-                text=simple_msg
+                text=simple_msg # Plain text, no Markdown
             )
             logger.info(f"Audit log sent (fallback) for user {user_id}")
         except Exception as e2:
@@ -742,14 +754,11 @@ async def gold_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE, quer
     else:
         user = update.effective_user
         user_msg = update.message.text
-        # Show processing message
         processing_msg = await update.message.reply_text("⏳ در حال دریافت اطلاعات...")
 
     settings = get_user_settings(user.id)
     try:
-        # Fetch gold data (will check multiple posts if needed) - REAL-TIME
         tala, ounce = fetch_and_parse_gold()
-        # Fetch USD data (will check multiple posts if needed) - REAL-TIME
         usd_toman = fetch_and_parse_usd()
         fair, var, verdict, emoji, status = analyze_market(
             tala, usd_toman, ounce,
@@ -757,13 +766,10 @@ async def gold_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE, quer
             settings['wait_threshold']
         )
 
-        # Get trend/RSI/volatility from DATABASE - ANALYZED DATA
         trend_info = get_price_history_for_analysis_bot(TREND_HOURS)
 
-        # Save the real-time data fetched by the bot with source 'bot'
         save_price_history(tala, usd_toman, ounce, fair, var, source='bot')
 
-        # Prepare trend info for the response string, handling potential N/A values
         trend_str = trend_info.get('trend', 'N/A')
         rsi_str = trend_info.get('rsi', 'N/A')
         volatility_str = trend_info.get('volatility', 'N/A')
@@ -780,7 +786,6 @@ async def gold_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE, quer
             f"📊 **شاخص RSI (از دیتابیس):** {rsi_str}\n"
             f"📉 **نوسانات (از دیتابیس):** {volatility_str}\n"
             f"{verdict}\n"
-            # Removed: "👤 Bot creator: @b4bak"
         )
 
         if query:
@@ -805,11 +810,11 @@ async def gold_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE, quer
 async def show_chart(update: Update, context: ContextTypes.DEFAULT_TYPE, query=None):
     if query:
         user = query.from_user
-        user_msg = f"Callback: {query.data}" # Changed to query.data for button press
+        user_msg = f"Callback: {query.data}"
         await query.answer("در حال تولید نمودار...")
     else:
         user = update.effective_user
-        user_msg = "Command: /chart" # Changed to command name
+        user_msg = "Command: /chart"
 
     try:
         chart = generate_price_chart()
@@ -848,11 +853,11 @@ async def show_chart(update: Update, context: ContextTypes.DEFAULT_TYPE, query=N
 async def show_history_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, query=None):
     if query:
         user = query.from_user
-        user_msg = f"Callback: {query.data}" # Changed to query.data for button press
+        user_msg = f"Callback: {query.data}" 
         await query.answer("باز کردن منوی تاریخچه...")
     else:
         user = update.effective_user
-        user_msg = "Command: /history" # Changed to command name
+        user_msg = "Command: /history"
 
     try:
         msg = "🔍 **انتخاب بازه زمانی برای تاریخچه قیمت**"
@@ -878,11 +883,11 @@ async def show_history_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 async def show_history_chart(update: Update, context: ContextTypes.DEFAULT_TYPE, query=None):
     if query:
         user = query.from_user
-        user_msg = f"Callback: {query.data}" # Changed to query.data for button press
+        user_msg = f"Callback: {query.data}" 
         await query.answer("در حال تولید نمودار تاریخچه...")
     else:
         user = update.effective_user
-        user_msg = f"Command: /history with unknown source" # Fallback if called directly
+        user_msg = f"Command: /history with unknown source"
 
     timeframe = query.data.split('_')[1] if query else None
     if not timeframe:
@@ -929,12 +934,10 @@ async def show_history_chart(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 photo=chart,
                 caption=caption
             )
-            # Go back to history menu
             await query.message.reply_text("🔍 **انتخاب بازه زمانی برای تاریخچه قیمت**", reply_markup=history_menu_keyboard())
         else:
             await update.message.reply_photo(photo=chart, caption=caption)
 
-        # Audit log
         try:
             await audit_log(context, user.id, user.username, user_msg, f"History chart ({timeframe}) sent successfully")
         except Exception as e:
@@ -952,10 +955,10 @@ async def show_history_chart(update: Update, context: ContextTypes.DEFAULT_TYPE,
 async def settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, query=None):
     if query:
         user = query.from_user
-        user_msg = f"Callback: {query.data}" # Changed to query.data for button press
+        user_msg = f"Callback: {query.data}" 
     else:
         user = update.effective_user
-        user_msg = "Command: /settings" # Changed to command name
+        user_msg = "Command: /settings" 
     settings = get_user_settings(user.id)
     response = (
         "⚙️ **تنظیمات شما**\n"
@@ -982,7 +985,6 @@ async def settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, quer
             reply_markup=settings_menu_keyboard(settings['notifications'], settings['notification_flags'])
         )
 
-    # Audit log for settings access
     try:
         await audit_log(context, user.id, user.username, user_msg, f"Settings accessed. Notifications: {settings['notifications']}, Buy Thresh: {settings['buy_threshold']}, Sell Thresh: {settings['wait_threshold']}")
     except Exception as e:
@@ -993,16 +995,14 @@ async def toggle_notifications(query, user_id):
     new_value = 0 if settings['notifications'] else 1
     update_user_settings(user_id, notifications=new_value)
     await query.answer("✅ تنظیمات ذخیره شد")
-    # Refresh the settings menu to show the new state
     await settings_menu(None, None, query)
 
 async def toggle_notification_flag(query, user_id, flag):
     settings = get_user_settings(user_id)
     current_flags = settings['notification_flags']
-    new_flags = current_flags ^ flag # Toggle the specific flag
+    new_flags = current_flags ^ flag 
     update_user_settings(user_id, notification_flags=new_flags)
     await query.answer("✅ تنظیمات اعلان به‌روزرسانی شد")
-    # Refresh the settings menu to show the new state
     await settings_menu(None, None, query)
 
 async def set_thresholds_start(query, user_id):
@@ -1027,7 +1027,6 @@ async def set_threshold_type(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.edit_message_text("🔴 **آستانه فروش**\n"
                                       "مقدار جدید را به تومان وارد کنید:")
     else:
-        # Should not happen if keyboard is correct
         await query.edit_message_text("❌ خطای داخلی")
         return
     return ASK_THRESHOLD_VALUE
@@ -1058,57 +1057,46 @@ async def set_threshold_value(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     except ValueError:
         await update.message.reply_text("❌ لطفاً یک عدد معتبر وارد کنید.", reply_markup=main_menu_keyboard())
-        return ASK_THRESHOLD_VALUE # Stay in the conversation to re-enter value
+        return ASK_THRESHOLD_VALUE 
     except Exception as e:
         logger.exception("Setting threshold value failed")
         await update.message.reply_text("❌ خطا در تغییر آستانه. لطفاً دوباره تلاش کنید.", reply_markup=main_menu_keyboard())
 
-    # Clear the setting flag
     context.user_data.pop('setting_threshold', None)
     return ConversationHandler.END
 
 async def about_us(update: Update, context: ContextTypes.DEFAULT_TYPE, query=None):
-    # Debug: Print raw values
-    print(f"DEBUG: Raw USD_CHANNEL_USERNAME = '{USD_CHANNEL_USERNAME}', Raw GOLD_CHANNEL_USERNAME = '{GOLD_CHANNEL_USERNAME}'")
-
-    # Escape the channel names for MarkdownV2
-    usd_channel_escaped = escape_markdown(USD_CHANNEL_USERNAME, version=2)
-    gold_channel_escaped = escape_markdown(GOLD_CHANNEL_USERNAME, version=2)
-
-    # Debug: Print escaped values
-    print(f"DEBUG: Escaped USD_CHANNEL_USERNAME = '{usd_channel_escaped}', Escaped GOLD_CHANNEL_USERNAME = '{gold_channel_escaped}'")
+    """Handle the /about command and the 'About Us' button."""
+    usd_channel = escape_for_markdown_v2(USD_CHANNEL_USERNAME)
+    gold_channel = escape_for_markdown_v2(GOLD_CHANNEL_USERNAME)
 
     response = (
         "ℹ️ **درباره ما**\n"
-        "این ربات برای تحلیل قیمت طلا طراحی شده است.\n\n"
+        "این ربات برای تحلیل قیمت طلا طراحی شده است\\. \n\n"  
         "**منابع قیمت:**\n"
-        f"• دلار آزاد: @{usd_channel_escaped}\n"  # Use the escaped variable
-        f"• اونس جهانی و طلا: @{gold_channel_escaped}\n\n"  # Use the escaped variable
+        f"• دلار آزاد: @{usd_channel}\n"  
+        f"• اونس جهانی و طلا: @{gold_channel}\n\n" 
         "**سازنده ربات:**\n"
         "@b4bak"
     )
     if query:
         user = query.from_user
         user_msg = f"Callback: {query.data}"
-        # Use MarkdownV2 for consistency with audit log
         await query.edit_message_text(response, parse_mode="MarkdownV2", reply_markup=main_menu_keyboard())
-        # Audit log for button press
         await audit_log(context, user.id, user.username, user_msg, "About Us section accessed via button")
     else:
         user = update.effective_user
         user_msg = "/about"
-        # Use MarkdownV2 for consistency with audit log
         await update.message.reply_text(response, parse_mode="MarkdownV2", reply_markup=main_menu_keyboard())
-        # Audit log for command
         await audit_log(context, user.id, user.username, user_msg, "About Us section accessed via /about command")
 
 async def help_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, query=None):
     if query:
         user = query.from_user
-        user_msg = f"Callback: {query.data}" # Changed to query.data for button press
+        user_msg = f"Callback: {query.data}" 
     else:
         user = update.effective_user
-        user_msg = "Command: /help" # Changed to command name
+        user_msg = "Command: /help"
     response = (
         "📚 **راهنمای استفاده**\n"
         "**دستورات:**\n"
@@ -1118,14 +1106,13 @@ async def help_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, query=No
         "/settings - تنظیمات\n"
         "/calc - محاسبه گرم\n"
         "/history - تاریخچه قیمت\n"
-        "/about - درباره ما\n"  # Added /about
+        "/about - درباره ما\n" 
         "\n**ویژگی‌ها:**\n"
         "🔔 دریافت اعلان زمان خرید/فروش/حرکت قیمت\n"
         "📊 تحلیل لحظه‌ای بازار\n"
         "📈 نمودار روند قیمت\n"
         "🔍 تحلیل روند و شاخص‌های تکنیکال\n"
         "⚙️ تنظیمات شخصی‌سازی شده\n"
-        # Removed: "👤 Bot creator: @b4bak"
     )
     if query:
         await query.edit_message_text(response, parse_mode="Markdown", reply_markup=main_menu_keyboard())
@@ -1166,7 +1153,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_history_chart(update, context, query)
     elif query.data == "settings":
         await settings_menu(update, context, query)
-    elif query.data == "about_us": # Added handling for about_us button
+    elif query.data == "about_us":
         await about_us(update, context, query)
     elif query.data == "help":
         await help_menu(update, context, query)
@@ -1192,7 +1179,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await set_threshold_type(update, context)
         return ASK_THRESHOLD_VALUE
     elif query.data == "calc":
-        # Store that we're waiting for calc amount from this user
         context.user_data['waiting_for_calc'] = True
         await query.edit_message_text("💰 مبلغ خود را به تومان وارد کنید:")
 
@@ -1220,7 +1206,6 @@ async def calc_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📊 **محاسبه با {money:,} تومان**\n"
             f"🏷 بازار: {money / tala:.2f} گرم\n"
             f"⚖️ منصفانه: {money / fair_price:.2f} گرم\n"
-            # Removed: "👤 Bot creator: @b4bak"
         )
         await processing_msg.edit_text(response, parse_mode="Markdown", reply_markup=main_menu_keyboard())
 
@@ -1248,16 +1233,11 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     user_text = update.message.text
 
     if context.user_data.get('waiting_for_calc'):
-        # Process as calc amount - logging is handled within calc_amount
         return await calc_amount(update, context)
     elif context.user_data.get('setting_threshold'):
-        # Process as threshold value - logging is handled within set_threshold_value
         return await set_threshold_value(update, context)
     else:
-        # This is a text message not part of a conversation, log it
         await audit_log(context, user.id, user.username, f"Text Message: {user_text}", "Received text message outside of a conversation. Ignored.")
-        # Optionally, you could send a default message or guide the user
-        # await update.message.reply_text("❌ دستور نامعتبر. از منو استفاده کنید یا /help را بزنید.")
 
 # ================= ADMIN COMMANDS =================
 def is_admin(user_id):
@@ -1273,7 +1253,7 @@ def admin_keyboard():
         [InlineKeyboardButton("💾 مدیریت دیتابیس", callback_data="admin_db"),
          InlineKeyboardButton("📤 خروجی داده", callback_data="admin_export")],
         [InlineKeyboardButton("📢 ارسال پیام همگانی", callback_data="admin_broadcast_menu")],
-        [InlineKeyboardButton("🔍 چک سلامت", callback_data="admin_health_check")] # New Health Check
+        [InlineKeyboardButton("🔍 چک سلامت", callback_data="admin_health_check")] 
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -1319,10 +1299,10 @@ async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, query=N
     """Show admin main menu"""
     if query:
         user = query.from_user
-        user_msg = f"Callback: {query.data}" # Changed to query.data for button press
+        user_msg = f"Callback: {query.data}" 
     else:
         user = update.effective_user
-        user_msg = "Command: /admin" # Changed to command name
+        user_msg = "Command: /admin"
     if not is_admin(user.id):
         if query:
             await query.answer("❌ شما دسترسی ندارید", show_alert=True)
@@ -1349,10 +1329,8 @@ async def admin_health_check(update: Update, context: ContextTypes.DEFAULT_TYPE,
     """Admin health check command"""
     if query:
         user = query.from_user
-        user_msg = f"Callback: {query.data}" # Changed to query.data for button press
     else:
         user = update.effective_user
-        user_msg = "Command: /health" # Changed to command name
     if not is_admin(user.id):
         if query:
             await query.answer("❌ شما دسترسی ندارید", show_alert=True)
@@ -1392,13 +1370,20 @@ async def admin_health_check(update: Update, context: ContextTypes.DEFAULT_TYPE,
     response = "🔍 **چک سلامت ربات**\n" + "\n".join(health_status)
 
     if query:
-        await query.edit_message_text(response, parse_mode="Markdown", reply_markup=admin_keyboard())
+        try:
+            await query.edit_message_text(response, parse_mode="Markdown", reply_markup=admin_keyboard())
+        except telegram.error.BadRequest as e:
+            if "Message is not modified" in str(e):
+                logger.info("Health check message was not modified, ignoring.")
+                await query.answer("Health check run, no changes to display.")
+            else:
+                raise
     else:
         await update.message.reply_text(response, parse_mode="Markdown", reply_markup=admin_keyboard())
 
     # Audit log for health check
     try:
-        await audit_log(context, user.id, user.username, user_msg, f"Health check performed. Status: {health_status[0]}")
+        await audit_log(context, user.id, user.username, "Command: /health" if not query else f"Callback: {query.data}", f"Health check performed. Status: {health_status[0]}")
     except Exception as e:
         logger.error(f"Failed to log admin_health_check for user {user.id}: {e}")
 
@@ -1408,7 +1393,7 @@ async def test_audit(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ شما دسترسی ندارید")
         return
     user = update.effective_user
-    user_msg = "Command: /test_audit" # Changed to command name
+    user_msg = "Command: /test_audit"
     # Check if PRIVATE_CHANNEL_ID is set
     if not PRIVATE_CHANNEL_ID:
         await update.message.reply_text(
@@ -1482,17 +1467,15 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
     """Handle admin panel callbacks"""
     query = update.callback_query
     user = query.from_user
-    user_action = f"Callback: {query.data}" # Capture the specific admin button press
+    user_action = f"Callback: {query.data}" 
 
     if not is_admin(query.from_user.id):
         await query.answer("❌ شما دسترسی ندارید", show_alert=True)
-        # Still log unauthorized access attempts
         await audit_log(context, user.id, user.username, user_action, "Unauthorized admin access attempt")
         return
 
     await query.answer()
 
-    # Log the admin action *after* checking authorization
     await audit_log(context, user.id, user.username, user_action, f"Admin action: {query.data}")
 
     if query.data == "admin_menu":
@@ -1655,7 +1638,7 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         await query.answer(f"✅ {deleted} رکورد پاک شد", show_alert=True)
         # Refresh the db info
         await query.answer()
-        await admin_callback_handler(update, context)  # Re-trigger to show updated info
+        await admin_callback_handler(update, context)
     elif query.data == "db_info":
         db_size = get_db_size()
         conn = sqlite3.connect('gold_bot.db')
@@ -1668,18 +1651,25 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         date_range = c.fetchone()
         conn.close()
 
+        db_size_escaped = escape_for_markdown_v2(f"{db_size:.2f}")
+        db_path_escaped = escape_for_markdown_v2("gold_bot.db")
+        user_count_escaped = escape_for_markdown_v2(str(user_count))
+        price_count_escaped = escape_for_markdown_v2(str(price_count))
+
         response = (
             "📊 **اطلاعات دیتابیس**\n"
-            f"💾 حجم: {db_size:.2f} MB\n"
-            f"📁 مسیر: gold_bot.db\n"
+            f"💾 حجم: {db_size_escaped} MB\n"
+            f"📁 مسیر: {db_path_escaped}\n"
             f"**جداول:**\n"
-            f"👥 Users: {user_count} رکورد\n"
-            f"💰 Price History: {price_count} رکورد\n"
+            f"👥 Users: {user_count_escaped} رکورد\n"
+            f"💰 Price History: {price_count_escaped} رکورد\n"
         )
         if date_range[0]:
-            response += f"📅 بازه زمانی: {date_range[0]} تا {date_range[1]}"
+            start_date_escaped = escape_for_markdown_v2(date_range[0]) if date_range[0] else ""
+            end_date_escaped = escape_for_markdown_v2(date_range[1]) if date_range[1] else ""
+            response += f"📅 بازه زمانی: {start_date_escaped} تا {end_date_escaped}"
 
-        await query.edit_message_text(response, parse_mode="Markdown", reply_markup=admin_db_keyboard())
+        await query.edit_message_text(response, parse_mode="MarkdownV2", reply_markup=admin_db_keyboard())
 
     elif query.data == "admin_export":
         await query.edit_message_text(
@@ -1728,8 +1718,6 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="admin_menu")]])
         )
     elif query.data == "admin_broadcast_targeted":
-        # Example: Broadcast to users with buy_threshold < X
-        # This is a simplified example, you can expand the targeting logic
         example_target_msg = "🎯 **ارسال هدفمند**\n\n"
         example_target_msg += "این ویژگی اکنون فقط یک مثال است.\n"
         example_target_msg += "برای پیاده‌سازی کامل، باید منطق جدیدی در `admin_broadcast_send` اضافه شود.\n"
@@ -1747,21 +1735,15 @@ async def admin_broadcast_start(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text("❌ شما دسترسی ندارید")
         return ConversationHandler.END
     user = update.effective_user
-    user_msg = "Command: /broadcast" # Changed to command name
+    user_msg = "Command: /broadcast"
     await update.message.reply_text("📢 پیام خود را برای ارسال به همه کاربران وارد کنید:")
-    # Log the start of the broadcast conversation
     await audit_log(context, user.id, user.username, user_msg, "Started broadcast conversation")
     return ASK_BROADCAST
 
 async def admin_broadcast_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message.text
-    # Fetch all users with notifications enabled
     all_users = get_all_users_with_notifications()
-    # Example of targeted broadcast logic (currently applies to all)
-    # To implement specific targeting, you would filter `all_users` based on flags or thresholds here.
-    # Example: users_to_notify = [u for u in all_users if u[1] & NOTIF_BUY] # Only users wanting buy alerts
-    # For now, sending to all users with notifications on
-    users_to_notify = [u[0] for u in all_users] # Extract user_id from tuples
+    users_to_notify = [u[0] for u in all_users] 
 
     success = 0
     failed = 0
@@ -1769,7 +1751,7 @@ async def admin_broadcast_send(update: Update, context: ContextTypes.DEFAULT_TYP
         try:
             await context.bot.send_message(chat_id=user_id, text=message)
             success += 1
-            await asyncio.sleep(0.05)  # Rate limiting
+            await asyncio.sleep(0.05)  
         except Exception as e:
             logger.warning(f"Broadcast failed for user {user_id}: {e}")
             failed += 1
@@ -1779,7 +1761,6 @@ async def admin_broadcast_send(update: Update, context: ContextTypes.DEFAULT_TYP
         f"موفق: {success}\n"
         f"ناموفق: {failed}"
     )
-    # Log the broadcast result
     await audit_log(context, update.effective_user.id, update.effective_user.username, "Broadcast sent", f"Message: {message[:200]}... Success: {success}, Failed: {failed}")
     return ConversationHandler.END
 
@@ -1787,37 +1768,32 @@ async def admin_broadcast_send(update: Update, context: ContextTypes.DEFAULT_TYP
 async def monitor_prices(context: ContextTypes.DEFAULT_TYPE):
     """Background task to monitor prices and send alerts"""
     try:
-        # Fetch gold and USD data (will check multiple posts if needed)
         tala, ounce = fetch_and_parse_gold()
         usd_toman = fetch_and_parse_usd() # Ensure this returns Toman
 
-        # Log raw values for debugging price difference issue
         logger.info(f"Monitor Prices - Fetched Raw Tala: {tala}, Raw USD (Toman): {usd_toman}, Raw Ounce: {ounce}")
 
-        # Get all users with notifications enabled
         all_users = get_all_users_with_notifications()
 
         for user_tuple in all_users:
             user_id, flags, buy_thresh, wait_thresh = user_tuple
-            # Log user-specific thresholds for debugging
             logger.debug(f"Monitor Prices - Checking user {user_id} with thresholds Buy: {buy_thresh}, Wait: {wait_thresh} (in Toman)")
 
             fair, var, verdict, emoji, status = analyze_market(
-                tala, usd_toman, ounce, # Pass Toman values
-                buy_thresh, # Thresholds are in Toman
-                wait_thresh  # Thresholds are in Toman
+                tala, usd_toman, ounce,
+                buy_thresh,
+                wait_thresh
             )
 
-            # Log calculated values for debugging
             logger.debug(f"Monitor Prices - User {user_id}: Calculated Fair: {fair:.2f}, Diff (Var): {var:.2f}, Status: {status}")
 
-            # Check notification flags
             if flags & NOTIF_BUY and status == "BUY":
                 alert_msg = (
                     f"🔔 **هشدار خرید!**\n"
                     f"{verdict}\n"
-                    f"📊 اختلاف قیمت: {int(var):,} تومان\n"  # var is in Toman
-                    f"🏷 قیمت بازار: {tala:,} تومان\n"      # tala is in Toman
+                    f"📊 اختلاف قیمت: {int(var):,} تومان\n" 
+                    f"🏷 قیمت بازار: {tala:,} تومان\n" 
+                    f"⚖️ قیمت جهانی (تومان): {int(fair):,} تومان\n"
                     "برای جزئیات بیشتر /gold را بزنید"
                 )
                 try:
@@ -1835,8 +1811,9 @@ async def monitor_prices(context: ContextTypes.DEFAULT_TYPE):
                 alert_msg = (
                     f"🔔 **هشدار فروش!**\n"
                     f"{verdict}\n"
-                    f"📊 اختلاف قیمت: {int(var):,} تومان\n"  # var is in Toman
-                    f"🏷 قیمت بازار: {tala:,} تومان\n"      # tala is in Toman
+                    f"📊 اختلاف قیمت: {int(var):,} تومان\n"
+                    f"🏷 قیمت بازار: {tala:,} تومان\n"
+                    f"⚖️ قیمت جهانی (تومان): {int(fair):,} تومان\n"
                     "برای جزئیات بیشتر /gold را بزنید"
                 )
                 try:
@@ -1851,11 +1828,12 @@ async def monitor_prices(context: ContextTypes.DEFAULT_TYPE):
                     logger.warning(f"Alert send failed for user {user_id}: {e}")
 
             if flags & NOTIF_SIGNIFICANT_MOVE:
-                if abs(var) > 700000 or var < -100000: # Example thresholds in Toman
+                if abs(var) > 700000 or var < -100000:
                     alert_msg = (
                         f"🔔 **حرکت قیمت مهم!**\n"
-                        f"📊 اختلاف قیمت: {int(var):,} تومان\n"  # var is in Toman
-                        f"🏷 قیمت بازار: {tala:,} تومان\n"      # tala is in Toman
+                        f"📊 اختلاف قیمت: {int(var):,} تومان\n"
+                        f"🏷 قیمت بازار: {tala:,} تومان\n"
+                        f"⚖️ قیمت جهانی (تومان): {int(fair):,} تومان\n"
                         "برای جزئیات بیشتر /gold را بزنید"
                     )
                     try:
@@ -1880,16 +1858,16 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("gold", lambda u, c: gold_analysis(u, c)))
     app.add_handler(CommandHandler("chart", lambda u, c: show_chart(u, c)))
-    app.add_handler(CommandHandler("history", lambda u, c: show_history_menu(u, c))) # New command
+    app.add_handler(CommandHandler("history", lambda u, c: show_history_menu(u, c)))
     app.add_handler(CommandHandler("settings", lambda u, c: settings_menu(u, c)))
     app.add_handler(CommandHandler("help", lambda u, c: help_menu(u, c)))
-    app.add_handler(CommandHandler("about", lambda u, c: about_us(u, c))) # Added /about command
+    app.add_handler(CommandHandler("about", lambda u, c: about_us(u, c)))
 
     # Admin commands
     app.add_handler(CommandHandler("admin", lambda u, c: admin_menu(u, c)))
     app.add_handler(CommandHandler("stats", admin_stats))
     app.add_handler(CommandHandler("test_audit", test_audit))
-    app.add_handler(CommandHandler("health", admin_health_check)) # New admin command
+    app.add_handler(CommandHandler("health", admin_health_check))
 
     app.add_handler(ConversationHandler(
         entry_points=[CommandHandler("broadcast", admin_broadcast_start)],
@@ -1906,19 +1884,17 @@ def main():
 
     # Threshold setting conversation
     app.add_handler(ConversationHandler(
-        entry_points=[CallbackQueryHandler(set_threshold_type, pattern='^set_(buy|wait)_threshold$')], # Triggered by callback
+        entry_points=[CallbackQueryHandler(set_threshold_type, pattern='^set_(buy|wait)_threshold$')], 
         states={ASK_THRESHOLD_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_threshold_value)]},
-        fallbacks=[CallbackQueryHandler(lambda u, c: settings_menu(u, c, query=u.callback_query), pattern='^settings$')] # Fallback to settings if user clicks back
+        fallbacks=[CallbackQueryHandler(lambda u, c: settings_menu(u, c, query=u.callback_query), pattern='^settings$')]
     ))
 
-    # Callback handlers (must be before text handler)
     app.add_handler(CallbackQueryHandler(button_callback))
 
     # Handle text messages (for inline button calc and threshold input)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
 
     # Job queue for price monitoring (every 30 minutes)
-    # Optional: install with `pip install "python-telegram-bot[job-queue]"`
     try:
         job_queue = app.job_queue
         if job_queue:
