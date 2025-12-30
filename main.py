@@ -1,4 +1,3 @@
-# main.py (Updated sections)
 import re
 import os
 import logging
@@ -20,15 +19,12 @@ from telegram.ext import (
     filters
 )
 import matplotlib
-matplotlib.use('Agg') # Use non-interactive backend
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-# Try to set a font that is more likely available in cloud environments
-plt.rcParams['font.family'] = ['DejaVu Sans'] # A common default font in matplotlib
-# If Persian text still doesn't show correctly, you might need to bundle a font file
-# and load it explicitly using matplotlib.font_manager.FontProperties
+plt.rcParams['font.family'] = ['DejaVu Sans']
 from io import BytesIO
-import numpy as np # For technical indicators - Ensure this is installed: pip install numpy
-from telegram.helpers import escape_markdown # Import for audit log fix
+import numpy as np 
+from telegram.helpers import escape_markdown 
 
 # ================= LOGGING =================
 logging.basicConfig(
