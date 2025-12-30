@@ -1,264 +1,137 @@
-# 🪙 Gold Price Analysis Telegram Bot
+# Telegram Gold Price Analysis Bot
 
-[![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://www.python.org/downloads/)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Telegram](https://img.shields.io/badge/Telegram-Bot-blue.svg)](https://telegram.org/)
+A Python-based Telegram bot designed to analyze gold prices based on global USD and gold ounce prices. It fetches real-time data from specified Telegram channels, calculates a "fair price" for 18K gold in Iranian Toman, compares it with the market price, and provides buy/hold/sell signals. The bot includes user settings, price history, chart generation, admin tools, and notification features.
 
-A sophisticated Telegram bot that provides real-time gold price analysis for the Iranian market, helping users make informed decisions about buying or selling gold based on global ounce prices and live USD exchange rates.
+## Features
 
-## ✨ Features
+*   **Real-time Analysis:** Fetches USD and gold ounce prices from external Telegram channels (e.g., `@ecogold_ir`, `@tgjucurrency`).
+*   **Price Calculation:** Calculates a "fair price" for 18K gold per gram in Toman based on global rates.
+*   **Signal Generation:** Provides clear "Buy", "Wait", or "Sell" signals based on the difference between market and fair prices.
+*   **Customizable Thresholds:** Users can set their own "Buy" and "Sell" threshold values.
+*   **Notification System:** Sends alerts to users when specific conditions (Buy/Sell/Significant Move) are met. (Notifications are checked periodically).
+*   **Price Charts:** Generates and sends price comparison charts (Market vs. Fair Price) for the last 24 hours.
+*   **Price History:** Allows users to view price history for different timeframes (24h, 7d, 30d) via charts.
+*   **Trend Analysis:** Calculates and displays price trends (UPWARD/DOWNWARD/FLAT) and volatility based on recent data (last 6 hours).
+*   **Technical Indicators:** Calculates a simplified Relative Strength Index (RSI).
+*   **User Settings:** Allows users to manage notification preferences and thresholds.
+*   **Admin Panel:** Provides administrators with statistics, user management, database tools, and broadcasting capabilities.
+*   **Audit Logging:** Logs user interactions to a private Telegram channel for analysis.
+*   **Crawler Service:** A separate service (`crawler_service.py`) fetches and stores price data with technical indicators every 10 minutes for efficient charting and historical analysis.
+*   **About Us Section:** Provides information about the bot, price sources, and the creator.
 
-### 📊 Core Functionality
-- **Real-time Price Analysis** - Fetches live data from Telegram channels and calculates fair market prices
-- **Smart Decision Engine** - Provides buy/wait/sell recommendations based on price differences
-- **Price Calculator** - Calculate how many grams of gold you can buy with your budget
-- **Interactive Charts** - Visual comparison of market prices vs. fair prices (24-hour history)
+## Prerequisites
 
-### 🎛️ User Experience
-- **Inline Keyboard Interface** - Modern, button-based interaction (no typing commands!)
-- **Persian Language Support** - Fully localized for Iranian users
-- **Customizable Settings** - Personal thresholds and notification preferences
-- **Multi-post Scanning** - Automatically searches through recent posts to find valid data
+*   Python 3.8 or higher
+*   A Telegram Bot Token (obtained from [@BotFather](https://t.me/BotFather))
+*   Access to the Telegram channels providing USD and Gold prices (e.g., `@ecogold_ir`, `@tgjucurrency`)
+*   (Optional) A private Telegram channel for audit logs
 
-### 🔔 Smart Notifications
-- **Price Alerts** - Automatic notifications when it's the perfect time to buy
-- **Background Monitoring** - Checks prices every 30 minutes
-- **User Preferences** - Enable/disable notifications per user
+## Installation
 
-### 👑 Admin Features
-- **User Statistics** - Track total users, active notifications, and price records
-- **Broadcast Messages** - Send announcements to all users
-- **Audit Logging** - Complete conversation logs sent to private channel
+1.  **Clone the repository:**
+    ```bash
+    git clone <YOUR_REPOSITORY_URL>
+    cd <YOUR_REPOSITORY_NAME>
+    ```
 
-### 🗄️ Data Management
-- **SQLite Database** - Persistent storage for user settings and price history
-- **Price History Tracking** - Stores all price data for trend analysis
-- **Automatic Data Recovery** - Recursively searches posts when latest doesn't contain data
+2.  **Create a virtual environment (recommended):**
+    ```bash
+    python -m venv venv
+    source venv/bin/activate
+    ```
 
-## 🎯 Decision Logic
+3.  **Install dependencies:**
+    ```bash
+    pip install -r requirements.txt
+    ```
+    *(The `requirements.txt` file should contain the necessary libraries like `python-telegram-bot`, `requests`, `beautifulsoup4`, `matplotlib`, `numpy`)*
 
-The bot uses a simple yet effective rule based on price difference:
+4.  **Set up environment variables:**
+    Create a `.env` file in the project root directory and add the following:
+    ```env
+    BOT_TOKEN=your_telegram_bot_token_here
+    PRIVATE_CHANNEL_ID=your_private_channel_id_for_audit_logs (optional, e.g., -1001234567890)
+    ADMIN_IDS=comma_separated_list_of_admin_user_ids (e.g., 123456789,987654321)
+    ```
 
-```
-var = market_price - fair_price
+## Configuration
 
-🟢 var < 100,000 tomans    → BUY (Best time to purchase)
-🟡 100,000 ≤ var < 500,000 → WAIT (Monitor the market)
-🔴 var ≥ 500,000 tomans    → SELL (Consider selling)
-```
+*   **Thresholds:** Default thresholds are defined in the code (`DEFAULT_BUY_THRESHOLD`, `DEFAULT_WAIT_THRESHOLD`). Users can adjust these individually via the bot interface.
+*   **Notification Types:** Default notification flags are defined (`DEFAULT_NOTIFICATION_FLAGS`).
+*   **Data Channels:** The bot fetches data from `GOLD_CHANNEL_USERNAME` and `USD_CHANNEL_USERNAME` defined in the code. Ensure these channels are accessible.
+*   **Crawler:** The `crawler_service.py` script needs the same channel details and runs independently to populate the database.
 
-Fair price is calculated as: `(USD_rate × Ounce_price) / 41.5`
+## Usage
 
-## 🚀 Quick Start
+### Running the Bot
 
-### Prerequisites
-- Python 3.8 or higher
-- A Telegram Bot Token (from [@BotFather](https://t.me/BotFather))
-- Access to a private Telegram channel for audit logs
+1.  **Start the Crawler (in a separate terminal/process):**
+    ```bash
+    python crawler_service.py
+    ```
+    This service should run continuously to collect data.
 
-### Installation
+2.  **Start the Bot:**
+    ```bash
+    python main.py
+    ```
 
-1. **Clone the repository**
-```bash
-git clone https://github.com/yourusername/gold-price-bot.git
-cd gold-price-bot
-```
+### Commands
 
-2. **Install dependencies**
-```bash
-pip install -r requirements.txt
-```
+*   `/start`: Initialize the bot and display the main menu.
+*   `/gold`: Perform gold price analysis and show the current signal.
+*   `/chart`: Generate and send a price comparison chart (last 24h).
+*   `/history`: Access the history menu to view charts for different timeframes.
+*   `/settings`: Manage notification preferences and thresholds.
+*   `/calc`: Start the gold calculation conversation (enter amount in Toman).
+*   `/help`: Show the help menu.
+*   `/about`: Display information about the bot, sources, and creator.
+*   `/admin`: Access the admin panel (admin only).
+*   `/stats`: Show bot statistics (admin only).
+*   `/health`: Perform a health check (admin only).
+*   `/test_audit`: Test audit logging (admin only).
+*   `/broadcast`: Start the broadcast message conversation (admin only).
 
-3. **Set up environment variables**
-```bash
-export BOT_TOKEN="your_bot_token_here"
-export PRIVATE_CHANNEL_ID="your_channel_id"
-export ADMIN_IDS="123456789,987654321"  # Comma-separated admin user IDs
-```
+### Admin Panel
 
-4. **Run the bot**
-```bash
-python main.py
-```
+The admin panel (accessed via `/admin`) offers:
 
-## 📦 Dependencies
+*   **Statistics:** View user counts, active notifications, price history stats.
+*   **User Management:** View user details.
+*   **Price Stats:** See latest, average, and range of prices.
+*   **Charts:** View admin-specific charts.
+*   **Database Management:** View database info, clear old history.
+*   **Data Export:** Export user and price history data as CSV.
+*   **Broadcast:** Send messages to all users (with targeting options).
 
-```txt
-python-telegram-bot>=20.0
-beautifulsoup4>=4.11.0
-requests>=2.28.0
-matplotlib>=3.5.0
-lxml>=4.9.0
-```
+## Project Structure
 
-### Optional: Price Monitoring
-For automatic price alerts, install the job-queue extension:
-```bash
-pip install "python-telegram-bot[job-queue]"
-```
+*   `main.py`: Main bot logic, commands, user interactions, settings, charting (using DB data), notifications, admin panel.
+*   `crawler_service.py`: Independent script to fetch prices, calculate indicators, and store data in the database.
+*   `requirements.txt`: List of Python dependencies.
+*   `.env`: Environment variables (not included in version control for security).
 
-## 🎮 Usage
+## Database
 
-### User Commands
-- `/start` - Initialize bot and show main menu
-- `/gold` - Get instant market analysis
-- `/chart` - View price comparison chart
-- `/calc` - Calculate grams you can buy
-- `/settings` - Customize your preferences
-- `/help` - Show help information
+The bot uses `SQLite` to store:
 
-### Admin Commands
-- `/stats` - View bot statistics
-- `/broadcast` - Send message to all users
+*   **User Settings:** `user_id`, `username`, `first_name`, `notifications`, `notification_flags`, `buy_threshold`, `wait_threshold`.
+*   **Price History:** `timestamp`, `tala_price`, `usd_price`, `ounce_price`, `fair_price`, `difference`, `source` ('bot' or 'crawler'), `rsi`, `volatility`, `trend`.
 
-### Inline Menu
-The bot features a modern inline keyboard interface:
-- 📊 **تحلیل بازار** (Market Analysis)
-- 💰 **محاسبه گرم** (Calculate Grams)
-- 📈 **نمودار قیمت** (Price Chart)
-- ⚙️ **تنظیمات** (Settings)
-- ℹ️ **راهنما** (Help)
+## Troubleshooting
 
-## 🗂️ Project Structure
+*   **Bot not responding:** Check the console logs for errors. Ensure the `BOT_TOKEN` is correct and the bot is not running elsewhere (causing a `Conflict` error).
+*   **Price data not fetching:** Verify the `GOLD_CHANNEL_USERNAME` and `USD_CHANNEL_USERNAME` are correct and the channels are accessible. Check the logs for fetch errors.
+*   **Charts not showing:** Ensure `matplotlib` is installed correctly and a compatible font is available (or use English labels in charts as implemented).
+*   **Audit logs failing:** Verify `PRIVATE_CHANNEL_ID` and that the bot is an admin of that channel.
+*   **Markdown errors:** These are handled with fallbacks, but check the logs for specific problematic characters in user input or dynamic data.
+*   **Crawler not running:** Ensure `crawler_service.py` is started and running independently.
 
-```
-gold-price-bot/
-│
-├── main.py                 # Main bot application
-├── gold_bot.db            # SQLite database (auto-created)
-├── requirements.txt       # Python dependencies
-├── README.md             # This file
-└── LICENSE               # MIT License
-```
+## Security
 
-## 🗃️ Database Schema
+*   Store your `BOT_TOKEN` and other sensitive information in environment variables (`.env` file) and never commit them to the repository.
+*   Restrict the `ADMIN_IDS` list to trusted users only.
 
-### Users Table
-```sql
-CREATE TABLE users (
-    user_id INTEGER PRIMARY KEY,
-    username TEXT,
-    first_name TEXT,
-    notifications INTEGER DEFAULT 1,
-    buy_threshold INTEGER DEFAULT 100000,
-    wait_threshold INTEGER DEFAULT 500000,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-)
-```
+## License
 
-### Price History Table
-```sql
-CREATE TABLE price_history (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    tala_price INTEGER,
-    usd_price REAL,
-    ounce_price REAL,
-    fair_price REAL,
-    difference REAL
-)
-```
-
-## 🔧 Configuration
-
-### Data Sources
-The bot scrapes data from these Telegram channels:
-- **Gold Prices**: [@ecogold_ir](https://t.me/ecogold_ir)
-- **USD Rates**: [@tgjucurrency](https://t.me/tgjucurrency)
-
-### Default Thresholds
-```python
-DEFAULT_BUY_THRESHOLD = 100_000   # tomans
-DEFAULT_WAIT_THRESHOLD = 500_000  # tomans
-```
-
-Users can customize these values in their settings.
-
-### Monitoring Interval
-```python
-MONITOR_INTERVAL = 1800  # seconds (30 minutes)
-```
-
-## 🛡️ Error Handling
-
-The bot includes robust error handling:
-- **Multi-post Scanning**: Checks up to 10 recent posts if latest post lacks data
-- **Processing Messages**: Shows "⏳ در حال دریافت اطلاعات..." while fetching data
-- **Graceful Degradation**: Continues working even if price monitoring is unavailable
-- **Detailed Logging**: All errors logged with full stack traces
-
-## 📊 Features Overview
-
-| Feature | Status | Description |
-|---------|--------|-------------|
-| Real-time Analysis | ✅ | Live gold price analysis |
-| Price Calculator | ✅ | Calculate grams with your budget |
-| Price Charts | ✅ | Visual 24-hour trend graphs |
-| Custom Thresholds | ✅ | Personalized buy/sell limits |
-| Price Alerts | ✅ | Automatic notifications |
-| Admin Panel | ✅ | Statistics & broadcasting |
-| Audit Logging | ✅ | Complete conversation tracking |
-| Multi-language | 🇮🇷 | Persian (Farsi) |
-
-## 🎨 Screenshots
-
-### Main Menu
-The bot greets users with an intuitive inline keyboard interface.
-
-### Market Analysis
-Provides comprehensive breakdown of:
-- Current USD exchange rate
-- Global ounce price
-- Market price for 18-karat gold
-- Calculated fair price
-- Price difference
-- Buy/Wait/Sell recommendation
-
-### Price Chart
-Visual matplotlib charts showing market price trends compared to fair prices.
-
-## 🤝 Contributing
-
-Contributions are welcome! Here's how you can help:
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
-
-### Areas for Contribution
-- [ ] Add support for other precious metals (silver, platinum)
-- [ ] Implement historical price analysis
-- [ ] Add more chart types and timeframes
-- [ ] Create web dashboard for statistics
-- [ ] Add multi-language support
-- [ ] Implement machine learning price predictions
-
-## 📝 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## 👤 Author
-
-**Created by [@b4bak](https://t.me/b4bak)**
-
-## 🙏 Acknowledgments
-
-- Data sources: [@ecogold_ir](https://t.me/ecogold_ir) and [@tgjucurrency](https://t.me/tgjucurrency)
-- Built with [python-telegram-bot](https://github.com/python-telegram-bot/python-telegram-bot)
-- Charts powered by [matplotlib](https://matplotlib.org/)
-
-## 📞 Support
-
-If you encounter any issues or have questions:
-- Open an issue on GitHub
-- Contact [@b4bak](https://t.me/b4bak) on Telegram
-
-## ⚠️ Disclaimer
-
-This bot provides information for educational purposes only. Price analysis and recommendations should not be considered as financial advice. Always do your own research and consult with financial professionals before making investment decisions.
-
----
-
-**Star ⭐ this repository if you find it helpful!**
+[Specify your license here, e.g., MIT, GPL, etc., or state "This project is unlicensed and its source code is proprietary."]
