@@ -371,10 +371,10 @@ def parse_gold_post(text: str):
 
 def parse_usd_post(text: str):
     text = normalize(text)
-    usd = re.search(r"🇺🇸\s*دلار\s*:\s*([\d,]+)\s*ریال", text)
-    if not usd:
+    momentary_price_match = re.search(r"قیمت\s+لحظه\s+ای\s*[:\s]*\s*([\d,]+)\s*ریال", text)
+    if not momentary_price_match:
         return None
-    usd_rial = int(usd.group(1).replace(",", ""))
+    usd_rial = int(momentary_price_match.group(1).replace(",", ""))
     usd_toman = usd_rial / 10
     return usd_toman
 
@@ -551,8 +551,6 @@ def generate_price_difference_chart(days=7):
     return buf
 
 def generate_detailed_history_chart(start_time, end_time):
-    """Generate a chart for a specific time period with English labels, fetching data from DB"""
-    # Ensure inputs are datetime objects for comparison, but pass ISO format strings to DB query
     if isinstance(start_time, str):
         start_time_dt = datetime.fromisoformat(start_time)
     else:
@@ -617,34 +615,28 @@ async def audit_log(context: ContextTypes.DEFAULT_TYPE, user_id, username, comma
         logger.warning("PRIVATE_CHANNEL_ID not set - skipping audit log")
         return
 
-    # Debug: Log raw values before escaping
     logger.debug(f"Audit Log Raw Username: '{username}', Raw Command: '{command}', Raw Response Summary: '{response_summary}'")
 
-    # Ensure username is not None and escape it
     username_display = escape_for_markdown_v2(username if username else "No username")
 
-    # Truncate very long messages to avoid Telegram limits
     max_msg_length = 3000
     if len(command) > max_msg_length:
         command = command[:max_msg_length] + "... (truncated)"
     if len(response_summary) > max_msg_length:
         response_summary = response_summary[:max_msg_length] + "... (truncated)"
 
-    # Escape command and response_summary
     escaped_command = escape_for_markdown_v2(command)
     escaped_response_summary = escape_for_markdown_v2(response_summary)
 
-    # Debug: Log escaped values
     logger.debug(f"Audit Log Escaped Username: '{username_display}', Escaped Command: '{escaped_command}', Escaped Response Summary: '{escaped_response_summary}'")
 
-    # Build the message in parts to avoid unterminated string literal
     msg_part1 = (
         f"📨 **Interaction Log**\n"
-        f"👤 User: {username_display} (`{user_id}`)\n" # username_display is already escaped
+        f"👤 User: {username_display} (`{user_id}`)\n"
         f"⏰ Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
     )
-    msg_part2 = f"📥 **Command/Action:** `{escaped_command}`\n" # escaped_command is used
-    msg_part3 = f"📤 **Response Summary:** {escaped_response_summary[:1000]}"  # escaped_response_summary is used
+    msg_part2 = f"📥 **Command/Action:** `{escaped_command}`\n"
+    msg_part3 = f"📤 **Response Summary:** {escaped_response_summary[:1000]}"
 
     msg = msg_part1 + msg_part2 + msg_part3
 
@@ -668,7 +660,7 @@ async def audit_log(context: ContextTypes.DEFAULT_TYPE, user_id, username, comma
 
             await context.bot.send_message(
                 chat_id=PRIVATE_CHANNEL_ID,
-                text=simple_msg # Plain text, no Markdown
+                text=simple_msg
             )
             logger.info(f"Audit log sent (fallback) for user {user_id}")
         except Exception as e2:
@@ -748,8 +740,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def gold_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE, query=None):
     if query:
         user = query.from_user
-        user_msg = f"Callback: {query.data}" # Changed to query.data for button press
-        # Show processing message
+        user_msg = f"Callback: {query.data}"
         await query.edit_message_text("⏳ در حال دریافت اطلاعات...")
     else:
         user = update.effective_user
@@ -766,6 +757,10 @@ async def gold_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE, quer
             settings['wait_threshold']
         )
 
+        bubble_percentage = 0.0
+        if fair > 0:
+            bubble_percentage = ((var) / fair) * 100 # var = tala - fair
+
         trend_info = get_price_history_for_analysis_bot(TREND_HOURS)
 
         save_price_history(tala, usd_toman, ounce, fair, var, source='bot')
@@ -776,16 +771,18 @@ async def gold_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE, quer
 
         response = (
             f"{emoji} **تحلیل بازار طلا**\n"
-            f"💵 دلار آزاد: {usd_toman:,} تومان\n"
-            f"🌍 اونس جهانی: ${ounce}\n"
             f"🏷 قیمت بازار (هر گرم): {tala:,} تومان\n"
             f"📊 قیمت بازار (مثقال): {int(tala * 4.6):,} تومان\n"
             f"⚖️ قیمت منصفانه: {int(fair):,} تومان\n"
             f"📉 اختلاف قیمت: {int(var):,} تومان\n"
+            f"🫧 **درصد حباب:** {bubble_percentage:.2f}%\n"
+            f"💵 دلار آزاد: {usd_toman:,} تومان\n"
+            f"🌍 اونس جهانی: ${ounce}\n"
             f"📈 **تحلیل روند ({TREND_HOURS} ساعت گذشته - از دیتابیس):** {trend_str}\n"
             f"📊 **شاخص RSI (از دیتابیس):** {rsi_str}\n"
             f"📉 **نوسانات (از دیتابیس):** {volatility_str}\n"
             f"{verdict}\n"
+            # Removed: "👤 Bot creator: @b4bak"
         )
 
         if query:
@@ -795,7 +792,7 @@ async def gold_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE, quer
 
         # Audit log with proper error handling
         try:
-            await audit_log(context, user.id, user.username, user_msg, f"Gold analysis: {status}, Trend: {trend_str}")
+            await audit_log(context, user.id, user.username, user_msg, f"Gold analysis: {status}, Trend: {trend_str}, Bubble: {bubble_percentage:.2f}%")
         except Exception as e:
             logger.error(f"Failed to log gold_analysis for user {user.id}: {e}")
 
@@ -1769,7 +1766,7 @@ async def monitor_prices(context: ContextTypes.DEFAULT_TYPE):
     """Background task to monitor prices and send alerts"""
     try:
         tala, ounce = fetch_and_parse_gold()
-        usd_toman = fetch_and_parse_usd() # Ensure this returns Toman
+        usd_toman = fetch_and_parse_usd()
 
         logger.info(f"Monitor Prices - Fetched Raw Tala: {tala}, Raw USD (Toman): {usd_toman}, Raw Ounce: {ounce}")
 
@@ -1787,12 +1784,12 @@ async def monitor_prices(context: ContextTypes.DEFAULT_TYPE):
 
             logger.debug(f"Monitor Prices - User {user_id}: Calculated Fair: {fair:.2f}, Diff (Var): {var:.2f}, Status: {status}")
 
-            if flags & NOTIF_BUY and status == "BUY":
+            if flags & NOTIF_BUY and var < buy_thresh and var <= 0:
                 alert_msg = (
                     f"🔔 **هشدار خرید!**\n"
                     f"{verdict}\n"
-                    f"📊 اختلاف قیمت: {int(var):,} تومان\n" 
-                    f"🏷 قیمت بازار: {tala:,} تومان\n" 
+                    f"📊 اختلاف قیمت: {int(var):,} تومان\n"
+                    f"🏷 قیمت بازار: {tala:,} تومان\n"
                     f"⚖️ قیمت جهانی (تومان): {int(fair):,} تومان\n"
                     "برای جزئیات بیشتر /gold را بزنید"
                 )
@@ -1808,27 +1805,28 @@ async def monitor_prices(context: ContextTypes.DEFAULT_TYPE):
                     logger.warning(f"Alert send failed for user {user_id}: {e}")
 
             if flags & NOTIF_SELL and status == "SELL":
-                alert_msg = (
-                    f"🔔 **هشدار فروش!**\n"
-                    f"{verdict}\n"
-                    f"📊 اختلاف قیمت: {int(var):,} تومان\n"
-                    f"🏷 قیمت بازار: {tala:,} تومان\n"
-                    f"⚖️ قیمت جهانی (تومان): {int(fair):,} تومان\n"
-                    "برای جزئیات بیشتر /gold را بزنید"
-                )
-                try:
-                    await context.bot.send_message(
-                        chat_id=user_id,
-                        text=alert_msg,
-                        parse_mode="Markdown"
+                if var > wait_thresh:
+                    alert_msg = (
+                        f"🔔 **هشدار فروش!**\n"
+                        f"{verdict}\n"
+                        f"📊 اختلاف قیمت: {int(var):,} تومان\n"
+                        f"🏷 قیمت بازار: {tala:,} تومان\n"
+                        f"⚖️ قیمت جهانی (تومان): {int(fair):,} تومان\n"
+                        "برای جزئیات بیشتر /gold را بزنید"
                     )
-                    logger.info(f"SELL Alert sent to user {user_id}")
-                    await asyncio.sleep(0.05)
-                except Exception as e:
-                    logger.warning(f"Alert send failed for user {user_id}: {e}")
+                    try:
+                        await context.bot.send_message(
+                            chat_id=user_id,
+                            text=alert_msg,
+                            parse_mode="Markdown"
+                        )
+                        logger.info(f"SELL Alert sent to user {user_id}")
+                        await asyncio.sleep(0.05)
+                    except Exception as e:
+                        logger.warning(f"Alert send failed for user {user_id}: {e}")
 
             if flags & NOTIF_SIGNIFICANT_MOVE:
-                if abs(var) > 700000 or var < -100000:
+                if abs(var) > 700000 and var > 0:
                     alert_msg = (
                         f"🔔 **حرکت قیمت مهم!**\n"
                         f"📊 اختلاف قیمت: {int(var):,} تومان\n"

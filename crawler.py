@@ -148,10 +148,10 @@ def parse_gold_post(text: str):
 
 def parse_usd_post(text: str):
     text = normalize(text)
-    usd = re.search(r"🇺🇸\s*دلار\s*:\s*([\d,]+)\s*ریال", text)
-    if not usd:
+    momentary_price_match = re.search(r"قیمت\s+لحظه\s+ای\s*[:\s]*\s*([\d,]+)\s*ریال", text)
+    if not momentary_price_match:
         return None
-    usd_rial = int(usd.group(1).replace(",", ""))
+    usd_rial = int(momentary_price_match.group(1).replace(",", ""))
     usd_toman = usd_rial / 10
     return usd_toman
 
