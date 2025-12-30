@@ -30,8 +30,8 @@ A Python-based Telegram bot designed to analyze gold prices based on global USD 
 
 1.  **Clone the repository:**
     ```bash
-    git clone <YOUR_REPOSITORY_URL>
-    cd <YOUR_REPOSITORY_NAME>
+    git clone https://github.com/babakshofficial/Gold-Purchase-Bot.git
+    cd Gold-Purchase-Bot
     ```
 
 2.  **Create a virtual environment (recommended):**
@@ -50,7 +50,7 @@ A Python-based Telegram bot designed to analyze gold prices based on global USD 
     Create a `.env` file in the project root directory and add the following:
     ```env
     BOT_TOKEN=your_telegram_bot_token_here
-    PRIVATE_CHANNEL_ID=your_private_channel_id_for_audit_logs (optional, e.g., -1001234567890)
+    PRIVATE_CHANNEL_ID=your_private_channel_id_for_audit_logs
     ADMIN_IDS=comma_separated_list_of_admin_user_ids (e.g., 123456789,987654321)
     ```
 
@@ -131,7 +131,3 @@ The bot uses `SQLite` to store:
 
 *   Store your `BOT_TOKEN` and other sensitive information in environment variables (`.env` file) and never commit them to the repository.
 *   Restrict the `ADMIN_IDS` list to trusted users only.
-
-## License
-
-[Specify your license here, e.g., MIT, GPL, etc., or state "This project is unlicensed and its source code is proprietary."]
