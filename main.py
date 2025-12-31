@@ -4,6 +4,7 @@ import logging
 import requests
 import asyncio
 import sqlite3
+import datetime
 from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
 import telegram.error
@@ -436,10 +437,8 @@ def analyze_market(tala, usd_toman, ounce, buy_threshold, wait_threshold):
         status = "SELL"
     return fair_price, var, verdict, emoji, status
 
-# --- CHART FUNCTIONS WITH ENGLISH LABELS (Updated to fetch from DB) ---
 def generate_price_chart():
     """Generate price comparison chart with English labels, fetching data from DB (last 24 hours)"""
-    # Calculate time range
     end_time = datetime.now()
     start_time = end_time - timedelta(hours=24)
     history = get_price_history_by_timeframe(start_time.isoformat(), end_time.isoformat())
@@ -467,6 +466,113 @@ def generate_price_chart():
     buf.seek(0)
     plt.close()
     return buf
+
+async def send_daily_summary(context: ContextTypes.DEFAULT_TYPE):
+    """
+    Sends a daily summary of gold prices to users who have enabled NOTIF_SUMMARY.
+    This function should be scheduled to run once per day (e.g., at 23:59 or 00:00).
+    """
+    try:
+        logger.info("Starting daily summary process.")
+        now = datetime.datetime.now()
+        start_of_period = datetime.datetime.combine(now.date() - datetime.timedelta(days=1), datetime.time.min)
+        end_of_period = datetime.datetime.combine(now.date() - datetime.timedelta(days=1), datetime.time.max)
+        conn = sqlite3.connect('gold_bot.db')
+        c = conn.cursor()
+        c.execute('''
+            SELECT tala_price, timestamp
+            FROM price_history
+            WHERE timestamp >= ? AND timestamp <= ?
+            ORDER BY timestamp ASC
+        ''', (start_of_period.isoformat(), end_of_period.isoformat()))
+        period_data = c.fetchall()
+        conn.close()
+
+        if not period_data:
+            logger.info(f"No price data found for summary period {start_of_period} to {end_of_period}. Skipping summary.")
+            return
+
+        prices = [row[0] for row in period_data]
+        timestamps = [datetime.datetime.fromisoformat(row[1]) for row in period_data]
+
+        if not prices:
+            logger.info(f"No price values found for summary period {start_of_period} to {end_of_period}. Skipping summary.")
+            return
+
+        open_price = prices[0]
+        close_price = prices[-1]
+        high_price = max(prices)
+        low_price = min(prices)
+        avg_price = sum(prices) / len(prices)
+        total_change = close_price - open_price
+        change_percentage = (total_change / open_price) * 100 if open_price != 0 else 0
+        conn = sqlite3.connect('gold_bot.db')
+        c = conn.cursor()
+        c.execute('''
+            SELECT fair_price, timestamp
+            FROM price_history
+            WHERE timestamp >= ? AND timestamp <= ?
+            ORDER BY timestamp DESC
+            LIMIT 1
+        ''', (start_of_period.isoformat(), end_of_period.isoformat()))
+        last_fair_result = c.fetchone()
+        conn.close()
+
+        last_fair_price = None
+        if last_fair_result:
+             last_fair_price = last_fair_result[0]
+        else:
+            conn = sqlite3.connect('gold_bot.db')
+            c = conn.cursor()
+            c.execute('''
+                SELECT fair_price, timestamp
+                FROM price_history
+                WHERE timestamp < ?
+                ORDER BY timestamp DESC
+                LIMIT 1
+            ''', (start_of_period.isoformat(),))
+            last_fair_before_period = c.fetchone()
+            conn.close()
+            if last_fair_before_period:
+                last_fair_price = last_fair_before_period[0]
+
+        bubble_percentage = 0.0
+        if last_fair_price and close_price > 0:
+            bubble_percentage = ((close_price - last_fair_price) / last_fair_price) * 100
+
+        summary_message = (
+            f"📈 **خلاصه روزانه قیمت طلا ({start_of_period.strftime('%Y-%m-%d')})**\n"
+            f"------+------+-------|\n"
+            f"بازشدن | {open_price:,} تومان |\n"
+            f"بسته شدن | {close_price:,} تومان |\n"
+            f"بالاترین | {high_price:,} تومان |\n"
+            f"پایین ترین | {low_price:,} تومان |\n"
+            f"میانگین | {int(avg_price):,} تومان |\n"
+            f"------+------+-------|\n"
+            f"تغییر: {total_change:+,} تومان ({change_percentage:+.2f}%)\n"
+            f"🫧 حباب (بر اساس آخرین قیمت منصفانه): {bubble_percentage:.2f}%\n"
+        )
+
+        all_users = get_all_users_with_notifications()
+        users_to_notify = [u for u in all_users if u[1] & NOTIF_SUMMARY]
+
+        success_count = 0
+        failed_count = 0
+        for user_tuple in users_to_notify:
+            user_id = user_tuple[0]
+            try:
+                await context.bot.send_message(chat_id=user_id, text=summary_message, parse_mode="Markdown")
+                success_count += 1
+                logger.debug(f"Daily summary sent to user {user_id}")
+                await asyncio.sleep(0.05)
+            except Exception as e:
+                logger.warning(f"Daily summary send failed for user {user_id}: {e}")
+                failed_count += 1
+
+        logger.info(f"Daily summary process finished. Sent to {success_count} users, failed for {failed_count} users.")
+
+    except Exception as e:
+        logger.exception("Daily summary process failed.")
 
 def generate_user_growth_chart(days=30):
     """Generate user growth chart with English labels"""
@@ -955,10 +1061,14 @@ async def show_history_chart(update: Update, context: ContextTypes.DEFAULT_TYPE,
 async def settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, query=None):
     if query:
         user = query.from_user
-        user_msg = f"Callback: {query.data}" 
-    else:
+        user_msg = f"Settings refreshed after toggle (callback: {query.data})"
+    elif update:
         user = update.effective_user
-        user_msg = "Command: /settings" 
+        user_msg = update.message.text if update.message else "Settings accessed via command"
+    else:
+        logger.error("settings_menu called without update or query")
+        return
+
     settings = get_user_settings(user.id)
     response = (
         "⚙️ **تنظیمات شما**\n"
@@ -997,13 +1107,13 @@ async def toggle_notifications(query, user_id):
     await query.answer("✅ تنظیمات ذخیره شد")
     await settings_menu(None, None, query)
 
-async def toggle_notification_flag(query, user_id, flag):
+async def toggle_notification_flag(query, user_id, flag, context_from_callback):
     settings = get_user_settings(user_id)
     current_flags = settings['notification_flags']
-    new_flags = current_flags ^ flag 
+    new_flags = current_flags ^ flag
     update_user_settings(user_id, notification_flags=new_flags)
     await query.answer("✅ تنظیمات اعلان به‌روزرسانی شد")
-    await settings_menu(None, None, query)
+    await settings_menu(None, context_from_callback, query)
 
 async def set_thresholds_start(query, user_id):
     """Start the conversation for setting thresholds"""
@@ -1129,16 +1239,13 @@ async def help_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, query=No
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user = query.from_user
-    user_action = f"Callback: {query.data}" # Capture the specific button press
+    user_action = f"Callback: {query.data}"
 
-    # Check if it's an admin callback
     if query.data.startswith("admin_") or query.data.startswith("chart_") or query.data.startswith("db_") or query.data.startswith("export_"):
-        # Log admin action here before forwarding
         await audit_log(context, user.id, user.username, user_action, f"Admin action initiated: {query.data}")
         await admin_callback_handler(update, context)
         return
 
-    # Log the button press for non-admin actions
     await audit_log(context, user.id, user.username, user_action, f"Button '{query.data}' pressed")
 
     await query.answer()
@@ -1164,18 +1271,22 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     elif query.data == "toggle_notif":
         await toggle_notifications(query, query.from_user.id)
-    elif query.data == "toggle_notif_buy":
-        await toggle_notification_flag(query, query.from_user.id, NOTIF_BUY)
-    elif query.data == "toggle_notif_sell":
-        await toggle_notification_flag(query, query.from_user.id, NOTIF_SELL)
-    elif query.data == "toggle_notif_move":
-        await toggle_notification_flag(query, query.from_user.id, NOTIF_SIGNIFICANT_MOVE)
-    elif query.data == "toggle_notif_summary":
-        await toggle_notification_flag(query, query.from_user.id, NOTIF_SUMMARY)
+    elif query.data.startswith("toggle_notif_"):
+        flag_map = {
+            "toggle_notif_buy": NOTIF_BUY,
+            "toggle_notif_sell": NOTIF_SELL,
+            "toggle_notif_move": NOTIF_SIGNIFICANT_MOVE,
+            "toggle_notif_summary": NOTIF_SUMMARY,
+        }
+        flag = flag_map.get(query.data)
+        if flag is not None:
+             # Pass the context from the button_callback function
+            await toggle_notification_flag(query, query.from_user.id, flag, context)
+        else:
+            logger.warning(f"Unknown toggle flag requested: {query.data}")
     elif query.data == "set_thresholds":
         await set_thresholds_start(query, query.from_user.id)
     elif query.data.startswith("set_") and ("threshold" in query.data):
-        # Handle threshold type selection (buy/wait)
         await set_threshold_type(update, context)
         return ASK_THRESHOLD_VALUE
     elif query.data == "calc":
@@ -1194,8 +1305,6 @@ async def calc_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def calc_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_input = update.message.text
-    # Show processing message
-    processing_msg = await update.message.reply_text("⏳ در حال دریافت اطلاعات...")
     try:
         money = int(user_input.replace(",", ""))
         # Fetch gold and USD data (will check multiple posts if needed)
@@ -1206,25 +1315,29 @@ async def calc_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📊 **محاسبه با {money:,} تومان**\n"
             f"🏷 بازار: {money / tala:.2f} گرم\n"
             f"⚖️ منصفانه: {money / fair_price:.2f} گرم\n"
+            # Removed: "👤 Bot creator: @b4bak"
         )
-        await processing_msg.edit_text(response, parse_mode="Markdown", reply_markup=main_menu_keyboard())
+        # Reply directly to the user's message with the result
+        await update.message.reply_text(response, parse_mode="Markdown", reply_markup=main_menu_keyboard())
 
         # Audit log with proper error handling
         try:
-            await audit_log(context, user.id, user.username, f"Calc: {money:,}", f"Calculation result: {money / fair_price:.2f} grams at fair price")
+            await audit_log(context, user.id, user.username, f"calc: {money:,}", f"Calculation result: {money / fair_price:.2f} grams at fair price")
         except Exception as e:
             logger.error(f"Failed to log calc_amount for user {user.id}: {e}")
 
     except ValueError:
-        await processing_msg.edit_text("❌ عدد معتبر وارد کنید", reply_markup=main_menu_keyboard())
+        # Reply with the error message
+        await update.message.reply_text("❌ عدد معتبر وارد کنید", reply_markup=main_menu_keyboard())
         # Log the invalid input
-        await audit_log(context, user.id, user.username, f"Calc input: {user_input}", "Invalid number entered for calc")
+        await audit_log(context, user.id, user.username, f"calc input: {user_input}", "Invalid number entered for calc")
     except Exception as e:
         logger.exception("Calc failed")
-        await processing_msg.edit_text("❌ خطا در دریافت اطلاعات. لطفاً دوباره تلاش کنید.", reply_markup=main_menu_keyboard())
+        # Reply with the error message
+        await update.message.reply_text("❌ خطا در دریافت اطلاعات. لطفاً دوباره تلاش کنید.", reply_markup=main_menu_keyboard())
 
     # Clear the flag
-    context.user_data['waiting_for_calc'] = False
+    context.user_data.pop('waiting_for_calc', None)
     return ConversationHandler.END
 
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1892,7 +2005,6 @@ def main():
 
     app.add_handler(CallbackQueryHandler(button_callback))
 
-    # Handle text messages (for inline button calc and threshold input)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
 
     # Job queue for price monitoring (every 30 minutes)
@@ -1901,6 +2013,10 @@ def main():
         if job_queue:
             job_queue.run_repeating(monitor_prices, interval=1800, first=10)
             logger.info("Price monitoring enabled")
+
+            # Schedule daily summary
+            job_queue.run_daily(send_daily_summary, time=datetime.time(hour=18, minute=30))
+            logger.info("Daily summary scheduled for 18:00 every day.")
         else:
             logger.warning("JobQueue not available. Install with: pip install 'python-telegram-bot[job-queue]'")
     except Exception as e:
