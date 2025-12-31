@@ -7,6 +7,7 @@ import sqlite3
 from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
 import telegram.error
+from dotenv import load_dotenv
 from telegram.helpers import escape_markdown
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -26,6 +27,7 @@ from io import BytesIO
 import numpy as np 
 from telegram.helpers import escape_markdown 
 
+load_dotenv()
 # ================= LOGGING =================
 logging.basicConfig(
     level=logging.INFO,
@@ -43,28 +45,25 @@ USD_CHANNEL_URL = f"https://t.me/s/{USD_CHANNEL_USERNAME}"
 PRIVATE_CHANNEL_ID = os.getenv('PRIVATE_CHANNEL_ID')
 ADMIN_IDS = [int(x) for x in os.getenv('ADMIN_IDS', '').split(',') if x]
 REQUEST_TIMEOUT = 10
-# Default thresholds (in tomans)
+
 DEFAULT_BUY_THRESHOLD = 100_000
 DEFAULT_WAIT_THRESHOLD = 500_000
 ASK_AMOUNT = 1
 ASK_BROADCAST = 2
 ASK_DB_ACTION = 3
 ASK_EXPORT_DAYS = 4
-ASK_THRESHOLD_TYPE = 5 # New for setting thresholds
-ASK_THRESHOLD_VALUE = 6 # New for setting thresholds
-# Trend Analysis Config (Bot now gets this from DB)
-TREND_HOURS = 6 # Hours to look back for trend analysis
-# Notification Types
+ASK_THRESHOLD_TYPE = 5 
+ASK_THRESHOLD_VALUE = 6 
+TREND_HOURS = 6 
 NOTIF_BUY = 1
 NOTIF_SELL = 2
 NOTIF_SIGNIFICANT_MOVE = 4
 NOTIF_SUMMARY = 8
-DEFAULT_NOTIFICATION_FLAGS = NOTIF_BUY # Default is only Buy alerts
+DEFAULT_NOTIFICATION_FLAGS = NOTIF_BUY 
 # ================= DATABASE =================
 def init_db():
     conn = sqlite3.connect('gold_bot.db')
     c = conn.cursor()
-    # Users table - Added notification_flags column
     c.execute(f'''CREATE TABLE IF NOT EXISTS users (
         user_id INTEGER PRIMARY KEY,
         username TEXT,
@@ -75,7 +74,7 @@ def init_db():
         wait_threshold INTEGER DEFAULT {DEFAULT_WAIT_THRESHOLD},
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )''')
-    # Price history table - Added source, rsi, volatility, trend columns
+
     c.execute('''CREATE TABLE IF NOT EXISTS price_history (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -98,7 +97,7 @@ init_db()
 def add_or_update_user(user_id, username, first_name):
     conn = sqlite3.connect('gold_bot.db')
     c = conn.cursor()
-    # Check if user exists
+
     c.execute('SELECT user_id FROM users WHERE user_id = ?', (user_id,))
     exists = c.fetchone()
     if exists:
@@ -367,10 +366,16 @@ def parse_gold_post(text: str):
 
 def parse_usd_post(text: str):
     text = normalize(text)
-    momentary_price_match = re.search(r"قیمت\s+لحظه\s+ای\s*[:\s]*\s*([\d,]+)\s*ریال", text)
-    if not momentary_price_match:
+    if "قیمت ارزهای آزاد" not in text:
+        logger.debug(f"parse_usd_post: Skipping post, title does not contain 'قیمت ارزهای آزاد'. Content: {text[:200]}...") # Log for debugging
         return None
-    usd_rial = int(momentary_price_match.group(1).replace(",", ""))
+
+    usd_line_match = re.search(r"🇺🇸\s*دلار\s*[:\s]*\s*([\d,]+)\s*ریال", text)
+    if not usd_line_match:
+        logger.warning(f"parse_usd_post: Could not find '🇺🇸 دلار : ... ریال' line in the expected format within post titled 'قیمت ارزهای آزاد'. Content: {text[:500]}...") # Log for debugging
+        return None
+
+    usd_rial = int(usd_line_match.group(1).replace(",", ""))
     usd_toman = usd_rial / 10
     return usd_toman
 
@@ -394,21 +399,23 @@ def fetch_and_parse_gold(max_attempts: int = 10):
     raise ValueError("Gold data not found in recent posts")
 
 def fetch_and_parse_usd(max_attempts: int = 10):
-    """Fetch USD data, trying multiple posts if needed"""
     headers = {"User-Agent": "Mozilla/5.0"}
     r = requests.get(USD_CHANNEL_URL, headers=headers, timeout=REQUEST_TIMEOUT)
     r.raise_for_status()
     soup = BeautifulSoup(r.text, "html.parser")
     msgs = soup.select("div.tgme_widget_message_text")
     if not msgs:
-        raise RuntimeError("No messages found")
+        raise RuntimeError("No messages found in USD channel")
 
-    # Try from latest to oldest
     for i in range(min(max_attempts, len(msgs))):
         msg_text = msgs[-(i+1)].get_text("\n", strip=True)
-        result = parse_usd_post(msg_text)
-        if result:
-            return result
+        if msg_text and len(msg_text) > 20:
+            result = parse_usd_post(msg_text)
+            if result is not None: 
+                logger.info(f"Successfully parsed USD price ({result} Toman) from post #{i+1} (latest being #1).")
+                return result
+        else:
+            logger.debug(f"fetch_and_parse_usd: Skipping empty/short message #{i+1}")
 
     raise ValueError("USD price not found in recent posts")
 

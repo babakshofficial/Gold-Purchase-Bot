@@ -148,10 +148,16 @@ def parse_gold_post(text: str):
 
 def parse_usd_post(text: str):
     text = normalize(text)
-    momentary_price_match = re.search(r"قیمت\s+لحظه\s+ای\s*[:\s]*\s*([\d,]+)\s*ریال", text)
-    if not momentary_price_match:
+    if "قیمت ارزهای آزاد" not in text:
+        logger.debug(f"parse_usd_post: Skipping post, title does not contain 'قیمت ارزهای آزاد'. Content: {text[:200]}...") # Log for debugging
         return None
-    usd_rial = int(momentary_price_match.group(1).replace(",", ""))
+
+    usd_line_match = re.search(r"🇺🇸\s*دلار\s*[:\s]*\s*([\d,]+)\s*ریال", text)
+    if not usd_line_match:
+        logger.warning(f"parse_usd_post: Could not find '🇺🇸 دلار : ... ریال' line in the expected format within post titled 'قیمت ارزهای آزاد'. Content: {text[:500]}...") # Log for debugging
+        return None
+
+    usd_rial = int(usd_line_match.group(1).replace(",", ""))
     usd_toman = usd_rial / 10
     return usd_toman
 
@@ -175,21 +181,23 @@ def fetch_and_parse_gold(max_attempts: int = 10):
     raise ValueError("Gold data not found in recent posts")
 
 def fetch_and_parse_usd(max_attempts: int = 10):
-    """Fetch USD data, trying multiple posts if needed"""
     headers = {"User-Agent": "Mozilla/5.0"}
     r = requests.get(USD_CHANNEL_URL, headers=headers, timeout=REQUEST_TIMEOUT)
     r.raise_for_status()
     soup = BeautifulSoup(r.text, "html.parser")
     msgs = soup.select("div.tgme_widget_message_text")
     if not msgs:
-        raise RuntimeError("No messages found")
+        raise RuntimeError("No messages found in USD channel")
 
-    # Try from latest to oldest
     for i in range(min(max_attempts, len(msgs))):
         msg_text = msgs[-(i+1)].get_text("\n", strip=True)
-        result = parse_usd_post(msg_text)
-        if result:
-            return result
+        if msg_text and len(msg_text) > 20:
+            result = parse_usd_post(msg_text)
+            if result is not None: 
+                logger.info(f"Successfully parsed USD price ({result} Toman) from post #{i+1} (latest being #1).")
+                return result
+        else:
+            logger.debug(f"fetch_and_parse_usd: Skipping empty/short message #{i+1}")
 
     raise ValueError("USD price not found in recent posts")
 
