@@ -69,26 +69,29 @@ def init_db():
         user_id INTEGER PRIMARY KEY,
         username TEXT,
         first_name TEXT,
-        notifications INTEGER DEFAULT 1, -- Main on/off switch
-        notification_flags INTEGER DEFAULT {DEFAULT_NOTIFICATION_FLAGS}, -- Specific alert types
+        notifications INTEGER DEFAULT 1,
         buy_threshold INTEGER DEFAULT {DEFAULT_BUY_THRESHOLD},
         wait_threshold INTEGER DEFAULT {DEFAULT_WAIT_THRESHOLD},
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )''')
-
     c.execute('''CREATE TABLE IF NOT EXISTS price_history (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         tala_price INTEGER,
-        usd_price REAL,
-        ounce_price REAL,
+        usd_price REAL, -- This was the raw USD price in Toman fetched from the channel
+        ounce_price REAL, -- This was the raw Ounce price in USD fetched from the channel
         fair_price REAL,
-        difference REAL,
-        source TEXT DEFAULT 'unknown', -- 'crawler' or 'bot'
-        rsi REAL,
-        volatility REAL,
-        trend TEXT -- e.g., 'UPWARD', 'DOWNWARD', 'FLAT'
+        difference REAL
     )''')
+    try:
+        c.execute('ALTER TABLE price_history ADD COLUMN usd_raw_toman REAL')
+    except sqlite3.OperationalError:
+        pass
+    try:
+        c.execute('ALTER TABLE price_history ADD COLUMN ounce_raw_usd REAL')
+    except sqlite3.OperationalError:
+        pass
+
     conn.commit()
     conn.close()
 
@@ -147,33 +150,29 @@ def update_user_settings(user_id, notifications=None, notification_flags=None, b
     conn.commit()
     conn.close()
 
-def save_price_history(tala, usd, ounce, fair, diff, source='bot'):
-    """Save price data with source identifier"""
+def save_price_history(tala, usd_raw_toman, ounce_raw_usd, fair, diff):
+    """Save price data including raw USD and Ounce prices"""
     conn = sqlite3.connect('gold_bot.db')
     c = conn.cursor()
-    # For 'bot' entries, rsi, volatility, trend might be calculated differently or left NULL if not applicable for that specific fetch
-    # For now, let's set them to NULL for 'bot' source entries
-    c.execute('''INSERT INTO price_history (tala_price, usd_price, ounce_price, fair_price, difference, source, rsi, volatility, trend)
-                 VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL)''', (tala, usd, ounce, fair, diff, source))
+    c.execute('''INSERT INTO price_history (tala_price, usd_price, ounce_price, fair_price, difference)
+                 VALUES (?, ?, ?, ?, ?)''', (tala, usd_raw_toman, ounce_raw_usd, fair, diff))
     conn.commit()
     conn.close()
 
 def get_price_history(limit=24):
+    """Fetch price history - Updated to include raw USD and Ounce"""
     conn = sqlite3.connect('gold_bot.db')
     c = conn.cursor()
-    # Get the latest N entries, ordered by timestamp descending
-    c.execute('''SELECT timestamp, tala_price, fair_price, difference
+    c.execute('''SELECT timestamp, tala_price, usd_price, ounce_price, fair_price, difference
                  FROM price_history ORDER BY timestamp DESC LIMIT ?''', (limit,))
     results = c.fetchall()
     conn.close()
-    # Reverse to get chronological order (oldest first)
     return results[::-1]
 
 def get_price_history_for_analysis_bot(hours=TREND_HOURS):
     """Get price history for the last N hours from the database (for bot analysis) - prioritizes 'crawler' data"""
     conn = sqlite3.connect('gold_bot.db')
     c = conn.cursor()
-    # Format the SQL string correctly using .format()
     sql_query = '''SELECT rsi, volatility, trend, timestamp
                    FROM price_history
                    WHERE timestamp >= datetime('now', '-{} hours')
@@ -438,7 +437,6 @@ def analyze_market(tala, usd_toman, ounce, buy_threshold, wait_threshold):
     return fair_price, var, verdict, emoji, status
 
 def generate_price_chart():
-    """Generate price comparison chart with English labels, fetching data from DB (last 24 hours)"""
     end_time = datetime.now()
     start_time = end_time - timedelta(hours=24)
     history = get_price_history_by_timeframe(start_time.isoformat(), end_time.isoformat())
@@ -467,11 +465,59 @@ def generate_price_chart():
     plt.close()
     return buf
 
+def generate_usd_price_chart():
+    """Generate USD price chart (in Toman) - English Labels"""
+    history = get_price_history(limit=24)
+    if len(history) < 2:
+        return None
+
+    timestamps = [datetime.fromisoformat(h[0]) for h in history]
+    usd_prices_toman = [h[1] for h in history]
+
+    plt.figure(figsize=(10, 6))
+    plt.plot(timestamps, usd_prices_toman, label='USD Price (Toman)', marker='o', linewidth=2)
+
+    plt.xlabel('Time')
+    plt.ylabel('Price (Toman)')
+    plt.title('USD Price in Toman')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+
+    buf = BytesIO()
+    plt.savefig(buf, format='png', dpi=100, bbox_inches='tight')
+    buf.seek(0)
+    plt.close()
+    return buf
+
+def generate_ounce_price_chart():
+    """Generate Ounce price chart (in USD) - English Labels"""
+    history = get_price_history(limit=24)
+    if len(history) < 2:
+        return None
+
+    timestamps = [datetime.fromisoformat(h[0]) for h in history]
+    ounce_prices_usd = [h[2] for h in history]
+
+    plt.figure(figsize=(10, 6))
+    plt.plot(timestamps, ounce_prices_usd, label='Ounce Price (USD)', marker='s', linewidth=2)
+
+    plt.xlabel('Time')
+    plt.ylabel('Price (USD)')
+    plt.title('Gold Ounce Price (XAU) in USD')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+
+    buf = BytesIO()
+    plt.savefig(buf, format='png', dpi=100, bbox_inches='tight')
+    buf.seek(0)
+    plt.close()
+    return buf
+
 async def send_daily_summary(context: ContextTypes.DEFAULT_TYPE):
-    """
-    Sends a daily summary of gold prices to users who have enabled NOTIF_SUMMARY.
-    This function should be scheduled to run once per day (e.g., at 23:59 or 00:00).
-    """
     try:
         logger.info("Starting daily summary process.")
         now = datetime.datetime.now()
@@ -616,18 +662,22 @@ def generate_user_growth_chart(days=30):
     return buf
 
 def generate_price_difference_chart(days=7):
-    """Generate price difference trend chart with English labels, fetching data from DB"""
-    # Calculate time range
-    end_time = datetime.now()
-    start_time = end_time - timedelta(days=days)
-    history = get_price_history_by_timeframe(start_time.isoformat(), end_time.isoformat())
-    if len(history) < 2:
+    """Generate price difference trend chart with English labels"""
+    conn = sqlite3.connect('gold_bot.db')
+    c = conn.cursor()
+    c.execute('''SELECT timestamp, difference
+                 FROM price_history
+                 WHERE timestamp >= datetime('now', '-' || ? || ' days')
+                 ORDER BY timestamp''', (days,))
+    data = c.fetchall()
+    conn.close()
+
+    if len(data) < 2:
         return None
 
-    timestamps = [datetime.fromisoformat(h[0]) for h in history]
-    differences = [h[3] for h in history] # Use difference (var)
+    timestamps = [datetime.fromisoformat(d[0]) for d in data]
+    differences = [d[1] for d in data]
 
-    # Color code based on thresholds
     colors = []
     for diff in differences:
         if diff < DEFAULT_BUY_THRESHOLD:
@@ -660,23 +710,23 @@ def generate_price_difference_chart(days=7):
     return buf
 
 def generate_detailed_history_chart(start_time, end_time):
-    if isinstance(start_time, str):
-        start_time_dt = datetime.fromisoformat(start_time)
-    else:
-        start_time_dt = start_time
-    if isinstance(end_time, str):
-        end_time_dt = datetime.fromisoformat(end_time)
-    else:
-        end_time_dt = end_time
+    """Generate a chart for a specific time period with English labels"""
+    conn = sqlite3.connect('gold_bot.db')
+    c = conn.cursor()
+    c.execute('''SELECT timestamp, tala_price, fair_price, difference
+                 FROM price_history
+                 WHERE timestamp BETWEEN ? AND ?
+                 ORDER BY timestamp ASC''', (start_time, end_time))
+    data = c.fetchall()
+    conn.close()
 
-    history = get_price_history_by_timeframe(start_time_dt.isoformat(), end_time_dt.isoformat())
-    if len(history) < 2:
+    if len(data) < 2:
         return None
 
-    timestamps = [datetime.fromisoformat(h[0]) for h in history]
-    tala_prices = [h[1] for h in history]
-    fair_prices = [h[2] for h in history]
-    differences = [h[3] for h in history]
+    timestamps = [datetime.fromisoformat(h[0]) for h in data]
+    tala_prices = [h[1] for h in data]
+    fair_prices = [h[2] for h in data]
+    differences = [h[3] for h in data]
 
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
 
@@ -872,7 +922,7 @@ async def gold_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE, quer
 
         trend_info = get_price_history_for_analysis_bot(TREND_HOURS)
 
-        save_price_history(tala, usd_toman, ounce, fair, var, source='bot')
+        save_price_history(tala, usd_toman, ounce, fair, var)
 
         trend_str = trend_info.get('trend', 'N/A')
         rsi_str = trend_info.get('rsi', 'N/A')
@@ -891,7 +941,6 @@ async def gold_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE, quer
             f"📊 **شاخص RSI (از دیتابیس):** {rsi_str}\n"
             f"📉 **نوسانات (از دیتابیس):** {volatility_str}\n"
             f"{verdict}\n"
-            # Removed: "👤 Bot creator: @b4bak"
         )
 
         if query:
@@ -912,6 +961,90 @@ async def gold_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE, quer
             await query.edit_message_text(error_msg, reply_markup=main_menu_keyboard())
         else:
             await processing_msg.edit_text(error_msg, reply_markup=main_menu_keyboard())
+
+async def show_usd_chart(update: Update, context: ContextTypes.DEFAULT_TYPE, query=None):
+    if query:
+        user = query.from_user
+        user_msg = f"Callback: {query.data}"
+        await query.answer("Generating USD chart...")
+    else:
+        user = update.effective_user
+        user_msg = "Command: /usd_chart"
+
+    try:
+        chart = generate_usd_price_chart()
+        if chart is None:
+            msg = "📊 No sufficient data for USD chart. Please try again later."
+            if query:
+                await query.edit_message_text(msg)
+            else:
+                await update.message.reply_text(msg)
+            return
+
+        caption = "📈 USD Price Chart (Toman) - Last 24 Hours"
+        if query:
+            await context.bot.send_photo(
+                chat_id=query.message.chat_id,
+                photo=chart,
+                caption=caption
+            )
+        else:
+            await update.message.reply_photo(photo=chart, caption=caption)
+
+        # Audit log with proper error handling
+        try:
+            await audit_log(context, user.id, user.username, user_msg, "USD chart sent successfully")
+        except Exception as e:
+            logger.error(f"Failed to log show_usd_chart for user {user.id}: {e}")
+
+    except Exception as e:
+        logger.exception("USD Chart generation failed")
+        error_msg = "❌ Error generating USD chart"
+        if query:
+            await query.answer(error_msg, show_alert=True)
+        else:
+            await update.message.reply_text(error_msg)
+
+async def show_ounce_chart(update: Update, context: ContextTypes.DEFAULT_TYPE, query=None):
+    if query:
+        user = query.from_user
+        user_msg = f"Callback: {query.data}"
+        await query.answer("Generating Ounce chart...")
+    else:
+        user = update.effective_user
+        user_msg = "Command: /ounce_chart"
+
+    try:
+        chart = generate_ounce_price_chart()
+        if chart is None:
+            msg = "📊 No sufficient data for Ounce chart. Please try again later."
+            if query:
+                await query.edit_message_text(msg)
+            else:
+                await update.message.reply_text(msg)
+            return
+
+        caption = "📈 Gold Ounce Price Chart (USD) - Last 24 Hours"
+        if query:
+            await context.bot.send_photo(
+                chat_id=query.message.chat_id,
+                photo=chart,
+                caption=caption
+            )
+        else:
+            await update.message.reply_photo(photo=chart, caption=caption)
+        try:
+            await audit_log(context, user.id, user.username, user_msg, "Ounce chart sent successfully")
+        except Exception as e:
+            logger.error(f"Failed to log show_ounce_chart for user {user.id}: {e}")
+
+    except Exception as e:
+        logger.exception("Ounce Chart generation failed")
+        error_msg = "❌ Error generating Ounce chart"
+        if query:
+            await query.answer(error_msg, show_alert=True)
+        else:
+            await update.message.reply_text(error_msg)
 
 async def show_chart(update: Update, context: ContextTypes.DEFAULT_TYPE, query=None):
     if query:
@@ -1213,6 +1346,8 @@ async def help_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, query=No
         "/start - شروع و منوی اصلی\n"
         "/gold - تحلیل بازار طلا\n"
         "/chart - نمودار قیمت\n"
+        "/usdchart - نمودار قیمت دلار\n"
+        "/ouncechart - نمودار قیمت اونس\n"
         "/settings - تنظیمات\n"
         "/calc - محاسبه گرم\n"
         "/history - تاریخچه قیمت\n"
@@ -1898,6 +2033,8 @@ async def monitor_prices(context: ContextTypes.DEFAULT_TYPE):
                 wait_thresh
             )
 
+            save_price_history(tala, usd_toman, ounce, fair, var)
+
             logger.debug(f"Monitor Prices - User {user_id}: Calculated Fair: {fair:.2f}, Diff (Var): {var:.2f}, Status: {status}")
 
             if flags & NOTIF_BUY and var < buy_thresh and var <= 0:
@@ -1976,6 +2113,8 @@ def main():
     app.add_handler(CommandHandler("settings", lambda u, c: settings_menu(u, c)))
     app.add_handler(CommandHandler("help", lambda u, c: help_menu(u, c)))
     app.add_handler(CommandHandler("about", lambda u, c: about_us(u, c)))
+    app.add_handler(CommandHandler("usdchart", show_usd_chart))
+    app.add_handler(CommandHandler("ouncechart", show_ounce_chart))
 
     # Admin commands
     app.add_handler(CommandHandler("admin", lambda u, c: admin_menu(u, c)))
