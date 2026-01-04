@@ -691,7 +691,6 @@ def generate_price_difference_chart(days=7):
     plt.scatter(timestamps, differences, c=colors, s=50, alpha=0.6)
     plt.plot(timestamps, differences, linewidth=1, alpha=0.5, color='gray')
 
-    # Add threshold lines
     plt.axhline(y=DEFAULT_BUY_THRESHOLD, color='green', linestyle='--', label='Buy Threshold', alpha=0.7)
     plt.axhline(y=DEFAULT_WAIT_THRESHOLD, color='red', linestyle='--', label='Sell Threshold', alpha=0.7)
 
@@ -737,7 +736,6 @@ def generate_detailed_history_chart(start_time, end_time):
     ax1.legend()
     ax1.grid(True, alpha=0.3)
 
-    # Color code difference plot
     colors = []
     for diff in differences:
         if diff < DEFAULT_BUY_THRESHOLD:
