@@ -6,6 +6,8 @@ import requests
 import asyncio
 import sqlite3
 import datetime
+from requests.adapters import HTTPAdapter
+from requests.packages.urllib3.util.retry import Retry
 from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
 import telegram.error
@@ -46,8 +48,11 @@ GOLD_CHANNEL_URL = f"https://t.me/s/{GOLD_CHANNEL_USERNAME}"
 USD_CHANNEL_URL = f"https://t.me/s/{USD_CHANNEL_USERNAME}"
 PRIVATE_CHANNEL_ID = os.getenv('PRIVATE_CHANNEL_ID')
 ADMIN_IDS = [int(x) for x in os.getenv('ADMIN_IDS', '').split(',') if x]
-REQUEST_TIMEOUT = 10
-
+REQUEST_TIMEOUT = 30
+REQUEST_CONNECT_TIMEOUT = 10 
+REQUEST_READ_TIMEOUT = 60 
+MAX_FETCH_ATTEMPTS = 5  
+RETRY_BACKOFF_FACTOR = 2 
 DEFAULT_BUY_THRESHOLD = 100_000
 DEFAULT_WAIT_THRESHOLD = 500_000
 ASK_AMOUNT = 1
@@ -380,44 +385,107 @@ def parse_usd_post(text: str):
     usd_toman = usd_rial / 10
     return usd_toman
 
-def fetch_and_parse_gold(max_attempts: int = 10):
-    """Fetch gold data, trying multiple posts if needed"""
+def fetch_and_parse_gold():
+    """Fetch gold data from posts titled 'قیمت طلا', trying multiple posts if needed."""
     headers = {"User-Agent": "Mozilla/5.0"}
-    r = requests.get(GOLD_CHANNEL_URL, headers=headers, timeout=REQUEST_TIMEOUT)
-    r.raise_for_status()
-    soup = BeautifulSoup(r.text, "html.parser")
-    msgs = soup.select("div.tgme_widget_message_text")
-    if not msgs:
-        raise RuntimeError("No messages found")
+    session = requests_session_with_retries()
+    url = GOLD_CHANNEL_URL
 
-    for i in range(min(max_attempts, len(msgs))):
-        msg_text = msgs[-(i+1)].get_text("\n", strip=True)
-        result = parse_gold_post(msg_text)
-        if result:
-            return result
+    for attempt in range(MAX_FETCH_ATTEMPTS):
+        try:
+            logger.info(f"Attempt {attempt + 1}/{MAX_FETCH_ATTEMPTS} to fetch Gold data from {url}")
+            r = session.get(url, headers=headers, timeout=(REQUEST_CONNECT_TIMEOUT, REQUEST_READ_TIMEOUT))
+            r.raise_for_status()
 
-    raise ValueError("Gold data not found in recent posts")
+            soup = BeautifulSoup(r.text, "html.parser")
+            msgs = soup.select("div.tgme_widget_message_text")
+            if not msgs:
+                raise RuntimeError("No messages found in Gold channel")
 
-def fetch_and_parse_usd(max_attempts: int = 10):
+            num_msgs_to_check = min(10, len(msgs))
+            for i in range(num_msgs_to_check):
+                msg_text = msgs[-(i+1)].get_text("\n", strip=True)
+                if msg_text and len(msg_text) > 20:  
+                    result = parse_gold_post(msg_text)
+                    if result is not None:
+                        logger.info(f"Successfully parsed Gold data (Tala: {result[0]}, Ounce: {result[1]}) from post #{i+1} (latest being #1), attempt {attempt + 1}.")
+                        return result
+                else:
+                    logger.debug(f"fetch_and_parse_gold: Skipping empty/short message #{i+1}, attempt {attempt + 1}")
+
+            logger.warning(f"Gold price (from a post titled 'قیمت طلا' containing 'قیمت لحظه ای' and 'اونس:') not found in the last {num_msgs_to_check} posts, attempt {attempt + 1}.")
+
+        except requests.exceptions.Timeout as e:
+            logger.warning(f"Request timeout on attempt {attempt + 1} for Gold data: {e}")
+            if attempt == MAX_FETCH_ATTEMPTS - 1: # Last attempt
+                raise requests.exceptions.ReadTimeout(f"Failed to fetch Gold data after {MAX_FETCH_ATTEMPTS} attempts due to timeout.")
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"Request error on attempt {attempt + 1} for Gold data: {e}")
+            if attempt == MAX_FETCH_ATTEMPTS - 1: # Last attempt
+                 raise RuntimeError(f"Failed to fetch Gold data after {MAX_FETCH_ATTEMPTS} attempts: {e}")
+        except Exception as e:
+            logger.error(f"Unexpected error on attempt {attempt + 1} for Gold data: {e}")
+            if attempt == MAX_FETCH_ATTEMPTS - 1: # Last attempt
+                 raise RuntimeError(f"Failed to fetch Gold data after {MAX_FETCH_ATTEMPTS} attempts due to an unexpected error: {e}")
+
+        if attempt < MAX_FETCH_ATTEMPTS - 1:
+            wait_time = RETRY_BACKOFF_FACTOR ** attempt
+            logger.info(f"Waiting {wait_time} seconds before next Gold fetch attempt...")
+            time.sleep(wait_time)
+
+    raise RuntimeError(f"Gold price not found in the last {num_msgs_to_check} posts after {MAX_FETCH_ATTEMPTS} attempts.")
+
+
+def fetch_and_parse_usd():
+    """Fetch USD data from posts titled 'قیمت ارزهای آزاد', trying multiple posts if needed."""
     headers = {"User-Agent": "Mozilla/5.0"}
-    r = requests.get(USD_CHANNEL_URL, headers=headers, timeout=REQUEST_TIMEOUT)
-    r.raise_for_status()
-    soup = BeautifulSoup(r.text, "html.parser")
-    msgs = soup.select("div.tgme_widget_message_text")
-    if not msgs:
-        raise RuntimeError("No messages found in USD channel")
+    session = requests_session_with_retries()
+    url = USD_CHANNEL_URL
 
-    for i in range(min(max_attempts, len(msgs))):
-        msg_text = msgs[-(i+1)].get_text("\n", strip=True)
-        if msg_text and len(msg_text) > 20:
-            result = parse_usd_post(msg_text)
-            if result is not None: 
-                logger.info(f"Successfully parsed USD price ({result} Toman) from post #{i+1} (latest being #1).")
-                return result
-        else:
-            logger.debug(f"fetch_and_parse_usd: Skipping empty/short message #{i+1}")
+    for attempt in range(MAX_FETCH_ATTEMPTS):
+        try:
+            logger.info(f"Attempt {attempt + 1}/{MAX_FETCH_ATTEMPTS} to fetch USD data from {url}")
+            r = session.get(url, headers=headers, timeout=(REQUEST_CONNECT_TIMEOUT, REQUEST_READ_TIMEOUT))
+            r.raise_for_status()
 
-    raise ValueError("USD price not found in recent posts")
+            soup = BeautifulSoup(r.text, "html.parser")
+            msgs = soup.select("div.tgme_widget_message_text")
+            if not msgs:
+                raise RuntimeError("No messages found in USD channel")
+
+            num_msgs_to_check = min(10, len(msgs))
+            for i in range(num_msgs_to_check):
+                msg_text = msgs[-(i+1)].get_text("\n", strip=True)
+                if msg_text and len(msg_text) > 20:
+                    result = parse_usd_post(msg_text)
+                    if result is not None:
+                        logger.info(f"Successfully parsed USD data ({result} Toman) from post #{i+1} (latest being #1), attempt {attempt + 1}.")
+                        return result
+                else:
+                    logger.debug(f"fetch_and_parse_usd: Skipping empty/short message #{i+1}, attempt {attempt + 1}")
+
+            logger.warning(f"USD price (from a post titled 'قیمت ارزهای آزاد' containing '🇺🇸 دلار : ... ریال') not found in the last {num_msgs_to_check} posts, attempt {attempt + 1}.")
+
+        except requests.exceptions.Timeout as e:
+            logger.warning(f"Request timeout on attempt {attempt + 1} for USD data: {e}")
+            if attempt == MAX_FETCH_ATTEMPTS - 1: # Last attempt
+                raise requests.exceptions.ReadTimeout(f"Failed to fetch USD data after {MAX_FETCH_ATTEMPTS} attempts due to timeout.")
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"Request error on attempt {attempt + 1} for USD data: {e}")
+            if attempt == MAX_FETCH_ATTEMPTS - 1: # Last attempt
+                 raise RuntimeError(f"Failed to fetch USD data after {MAX_FETCH_ATTEMPTS} attempts: {e}")
+        except Exception as e:
+            logger.error(f"Unexpected error on attempt {attempt + 1} for USD data: {e}")
+            if attempt == MAX_FETCH_ATTEMPTS - 1: # Last attempt
+                 raise RuntimeError(f"Failed to fetch USD data after {MAX_FETCH_ATTEMPTS} attempts due to an unexpected error: {e}")
+
+        if attempt < MAX_FETCH_ATTEMPTS - 1:
+            wait_time = RETRY_BACKOFF_FACTOR ** attempt
+            logger.info(f"Waiting {wait_time} seconds before next USD fetch attempt...")
+            time.sleep(wait_time)
+
+    raise RuntimeError(f"USD price not found in the last {num_msgs_to_check} posts after {MAX_FETCH_ATTEMPTS} attempts.")
+
 
 def analyze_market(tala, usd_toman, ounce, buy_threshold, wait_threshold):
     fair_price = usd_toman * ounce / 41.5
@@ -632,6 +700,24 @@ def generate_ounce_price_chart_by_timeframe(start_time, end_time):
     buf.seek(0)
     plt.close()
     return buf
+
+def requests_session_with_retries():
+    """Creates a requests session with retry strategy."""
+    session = requests.Session()
+
+    retry_strategy = Retry(
+        total=MAX_FETCH_ATTEMPTS - 1,  
+        status_forcelist=[429, 500, 502, 503, 504],  
+        allowed_methods=["HEAD", "GET", "OPTIONS"], 
+        backoff_factor=RETRY_BACKOFF_FACTOR, 
+        raise_on_status=False
+    )
+
+    adapter = HTTPAdapter(max_retries=retry_strategy)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+
+    return session
 
 async def send_daily_summary(context: ContextTypes.DEFAULT_TYPE):
     try:
