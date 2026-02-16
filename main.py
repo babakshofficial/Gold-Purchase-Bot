@@ -61,6 +61,7 @@ ASK_DB_ACTION = 3
 ASK_EXPORT_DAYS = 4
 ASK_THRESHOLD_TYPE = 5 
 ASK_THRESHOLD_VALUE = 6 
+ASK_THRESHOLD_TYPE_SIGNIFICANT_MOVE = 7
 TREND_HOURS = 6 
 NOTIF_BUY = 1
 NOTIF_SELL = 2
@@ -80,6 +81,7 @@ def init_db():
         notifications INTEGER DEFAULT 1,
         buy_threshold INTEGER DEFAULT {DEFAULT_BUY_THRESHOLD},
         wait_threshold INTEGER DEFAULT {DEFAULT_WAIT_THRESHOLD},
+        significant_move_threshold INTEGER DEFAULT 700000, -- Add this new column
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )''')
     c.execute('''CREATE TABLE IF NOT EXISTS price_history (
@@ -109,23 +111,22 @@ init_db()
 def add_or_update_user(user_id, username, first_name):
     conn = sqlite3.connect('gold_bot.db')
     c = conn.cursor()
-
     c.execute('SELECT user_id FROM users WHERE user_id = ?', (user_id,))
     exists = c.fetchone()
     if exists:
         c.execute('''UPDATE users SET username = ?, first_name = ? WHERE user_id = ?''',
                   (username, first_name, user_id))
     else:
-        c.execute('''INSERT INTO users (user_id, username, first_name, notifications, notification_flags, buy_threshold, wait_threshold)
-                     VALUES (?, ?, ?, 1, ?, ?, ?)''',
-                  (user_id, username, first_name, DEFAULT_NOTIFICATION_FLAGS, DEFAULT_BUY_THRESHOLD, DEFAULT_WAIT_THRESHOLD))
+        c.execute('''INSERT INTO users (user_id, username, first_name, notifications, notification_flags, buy_threshold, wait_threshold, significant_move_threshold)
+                     VALUES (?, ?, ?, 1, ?, ?, ?, ?)''',
+                  (user_id, username, first_name, DEFAULT_NOTIFICATION_FLAGS, DEFAULT_BUY_THRESHOLD, DEFAULT_WAIT_THRESHOLD, 700000)) 
     conn.commit()
     conn.close()
 
 def get_user_settings(user_id):
     conn = sqlite3.connect('gold_bot.db')
     c = conn.cursor()
-    c.execute('SELECT notifications, notification_flags, buy_threshold, wait_threshold FROM users WHERE user_id = ?', (user_id,))
+    c.execute('SELECT notifications, notification_flags, buy_threshold, wait_threshold, significant_move_threshold FROM users WHERE user_id = ?', (user_id,))
     result = c.fetchone()
     conn.close()
     if result:
@@ -133,16 +134,18 @@ def get_user_settings(user_id):
             'notifications': result[0],
             'notification_flags': result[1],
             'buy_threshold': result[2],
-            'wait_threshold': result[3]
+            'wait_threshold': result[3],
+            'significant_move_threshold': result[4]
         }
     return {
         'notifications': 1,
         'notification_flags': DEFAULT_NOTIFICATION_FLAGS,
         'buy_threshold': DEFAULT_BUY_THRESHOLD,
-        'wait_threshold': DEFAULT_WAIT_THRESHOLD
+        'wait_threshold': DEFAULT_WAIT_THRESHOLD,
+        'significant_move_threshold': 700000
     }
 
-def update_user_settings(user_id, notifications=None, notification_flags=None, buy_threshold=None, wait_threshold=None):
+def update_user_settings(user_id, notifications=None, notification_flags=None, buy_threshold=None, wait_threshold=None, significant_move_threshold=None): 
     conn = sqlite3.connect('gold_bot.db')
     c = conn.cursor()
     if notifications is not None:
@@ -153,6 +156,8 @@ def update_user_settings(user_id, notifications=None, notification_flags=None, b
         c.execute('UPDATE users SET buy_threshold = ? WHERE user_id = ?', (buy_threshold, user_id))
     if wait_threshold is not None:
         c.execute('UPDATE users SET wait_threshold = ? WHERE user_id = ?', (wait_threshold, user_id))
+    if significant_move_threshold is not None: 
+        c.execute('UPDATE users SET significant_move_threshold = ? WHERE user_id = ?', (significant_move_threshold, user_id))
     conn.commit()
     conn.close()
 
@@ -225,8 +230,8 @@ def get_price_history_by_timeframe(start_time, end_time):
 def get_all_users_with_notifications():
     conn = sqlite3.connect('gold_bot.db')
     c = conn.cursor()
-    c.execute('SELECT user_id, notification_flags, buy_threshold, wait_threshold FROM users WHERE notifications = 1')
-    results = c.fetchall() 
+    c.execute('SELECT user_id, notification_flags, buy_threshold, wait_threshold, significant_move_threshold FROM users WHERE notifications = 1')
+    results = c.fetchall()
     conn.close()
     return results
 
@@ -373,7 +378,7 @@ def parse_gold_post(text: str):
 def parse_usd_post(text: str):
     text = normalize(text)
     if "قیمت ارزهای آزاد" not in text:
-        logger.debug(f"parse_usd_post: Skipping post, title does not contain 'قیمت ارزهای آزاد'. Content: {text[:200]}...") # Log for debugging
+        logger.debug(f"parse_usd_post: Skipping post, title does not contain 'قیمت ارزهای آزاد'. Content: {text[:200]}...")
         return None
 
     usd_line_match = re.search(r"🇺🇸\s*دلار\s*[:\s]*\s*([\d,]+)\s*ریال", text)
@@ -872,16 +877,16 @@ def generate_price_difference_chart(days=7):
         return None
 
     timestamps = [datetime.fromisoformat(h[0]) for h in history]
-    differences = [h[3] for h in history] # Use difference (var)
+    differences = [h[3] for h in history]
 
     colors = []
     for diff in differences:
         if diff < DEFAULT_BUY_THRESHOLD:
-            colors.append('#4CAF50')  # Green
+            colors.append('#4CAF50')
         elif diff < DEFAULT_WAIT_THRESHOLD:
-            colors.append('#FFC107')  # Yellow
+            colors.append('#FFC107')
         else:
-            colors.append('#F44336')  # Red
+            colors.append('#F44336')
 
     plt.figure(figsize=(12, 6))
     plt.scatter(timestamps, differences, c=colors, s=50, alpha=0.6)
@@ -936,11 +941,11 @@ def generate_detailed_history_chart(start_time, end_time):
     colors = []
     for diff in differences:
         if diff < DEFAULT_BUY_THRESHOLD:
-            colors.append('#4CAF50')  # Green
+            colors.append('#4CAF50')
         elif diff < DEFAULT_WAIT_THRESHOLD:
-            colors.append('#FFC107')  # Yellow
+            colors.append('#FFC107')
         else:
-            colors.append('#F44336')  # Red
+            colors.append('#F44336')
 
     ax2.scatter(timestamps, differences, c=colors, s=50, alpha=0.6)
     ax2.plot(timestamps, differences, linewidth=1, alpha=0.5, color='gray')
@@ -1078,6 +1083,7 @@ def thresholds_menu_keyboard():
     keyboard = [
         [InlineKeyboardButton("🟢 آستانه خرید", callback_data="set_buy_threshold")],
         [InlineKeyboardButton("🔴 آستانه فروش", callback_data="set_wait_threshold")],
+        [InlineKeyboardButton("📊 آستانه حرکت قیمت", callback_data="set_significant_move_threshold")],
         [InlineKeyboardButton("🔙 بازگشت", callback_data="settings")]
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -1119,10 +1125,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await audit_log(context, user.id, user.username, "/start", "Sent welcome message and main menu")
 
 async def gold_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE, query=None):
+    # Determine user and send initial processing message
     if query:
         user = query.from_user
         user_msg = f"Callback: {query.data}"
-        await query.edit_message_text("⏳ در حال دریافت اطلاعات...")
+        processing_msg = await context.bot.send_message(chat_id=query.message.chat_id, text="⏳ در حال دریافت اطلاعات...")
+        try:
+            await query.delete_message()
+        except Exception as e:
+            logger.warning(f"Could not delete gold button message: {e}")
     else:
         user = update.effective_user
         user_msg = update.message.text
@@ -1132,55 +1143,70 @@ async def gold_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE, quer
     try:
         tala, ounce = fetch_and_parse_gold()
         usd_toman = fetch_and_parse_usd()
-        fair, var, verdict, emoji, status = analyze_market(
-            tala, usd_toman, ounce,
-            settings['buy_threshold'],
-            settings['wait_threshold']
-        )
+        source_note = ""
+        logger.info(f"Fetched fresh  Tala={tala}, Ounce={ounce}, USD={usd_toman}")
 
-        bubble_percentage = 0.0
-        if fair > 0:
-            bubble_percentage = ((var) / fair) * 100
+    except Exception as e:
+        logger.warning(f"Real-time data fetch failed: {e}. Fetching from database.")
+        source_note = "\n\n⚠️ **توجه:** داده‌های نمایش داده شده از آخرین رکورد ذخیره شده در دیتابیس است و ممکن است دقیق نباشد."
+        conn = sqlite3.connect('gold_bot.db')
+        c = conn.cursor()
+        c.execute('''SELECT tala_price, ounce_price, usd_price FROM price_history ORDER BY timestamp DESC LIMIT 1''')
+        latest_record = c.fetchone()
+        conn.close()
 
-        trend_info = get_price_history_for_analysis_bot(TREND_HOURS)
-
-        save_price_history(tala, usd_toman, ounce, fair, var)
-
-        trend_str = trend_info.get('trend', 'N/A')
-        rsi_str = trend_info.get('rsi', 'N/A')
-        volatility_str = trend_info.get('volatility', 'N/A')
-
-        response = (
-            f"{emoji} **تحلیل بازار طلا**\n"
-            f"🏷 قیمت بازار (هر گرم): {tala:,} تومان\n"
-            f"📊 قیمت بازار (مثقال): {int(tala * 4.6):,} تومان\n"
-            f"⚖️ قیمت منصفانه: {int(fair):,} تومان\n"
-            f"📉 اختلاف قیمت: {int(var):,} تومان\n"
-            f"🫧 **درصد حباب:** {bubble_percentage:.2f}%\n"
-            f"💵 دلار آزاد: {usd_toman:,} تومان\n"
-            f"🌍 اونس جهانی: ${ounce}\n"
-            f"📈 **تحلیل روند ({TREND_HOURS} ساعت گذشته - از دیتابیس):** {trend_str}\n"
-            f"📊 **شاخص RSI (از دیتابیس):** {rsi_str}\n"
-            f"📉 **نوسانات (از دیتابیس):** {volatility_str}\n"
-            f"{verdict}\n"
-        )
-
-        if query:
-            await query.edit_message_text(response, parse_mode="Markdown", reply_markup=main_menu_keyboard())
+        if latest_record:
+            tala, ounce, usd_toman = latest_record
+            logger.info(f"Using database  Tala={tala}, Ounce={ounce}, USD={usd_toman}")
         else:
-            await processing_msg.edit_text(response, parse_mode="Markdown", reply_markup=main_menu_keyboard())
+            logger.error("No data available in database either.")
+            raise RuntimeError("داده‌ای برای نمایش وجود ندارد.")
 
-        # Audit log with proper error handling
-        try:
-            await audit_log(context, user.id, user.username, user_msg, f"Gold analysis: {status}, Trend: {trend_str}, Bubble: {bubble_percentage:.2f}%")
-        except Exception as e:
-            logger.error(f"Failed to log gold_analysis for user {user.id}: {e}")
+    fair, var, verdict, emoji, status = analyze_market(
+        tala, usd_toman, ounce,
+        settings['buy_threshold'],
+        settings['wait_threshold']
+    )
+
+    bubble_percentage = 0.0
+    if fair > 0:
+        bubble_percentage = ((var) / fair) * 100
+
+    trend_info = get_price_history_for_analysis_bot(TREND_HOURS)
+    trend_str = trend_info.get('trend', 'N/A')
+    rsi_str = trend_info.get('rsi', 'N/A')
+    volatility_str = trend_info.get('volatility', 'N/A')
+
+    save_price_history(tala, usd_toman, ounce, fair, var)
+
+    response = (
+        f"{emoji} **تحلیل بازار طلا**{source_note}\n"
+        f"🕒 **زمان تحلیل:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        f"🏷 قیمت بازار (هر گرم): {tala:,} تومان\n"
+        f"📊 قیمت بازار (مثقال): {int(tala * 4.6):,} تومان\n"
+        f"⚖️ قیمت منصفانه: {int(fair):,} تومان\n"
+        f"📉 اختلاف قیمت: {int(var):,} تومان\n"
+        f"🫧 **درصد حباب:** {bubble_percentage:.2f}%\n"
+        f"💵 دلار آزاد: {usd_toman:,} تومان\n"
+        f"🌍 اونس جهانی: ${ounce}\n"
+        f"📈 **تحلیل روند ({TREND_HOURS} ساعت گذشته - از دیتابیس):** {trend_str}\n"
+        f"📊 **شاخص RSI (از دیتابیس):** {rsi_str}\n"
+        f"📉 **نوسانات (از دیتابیس):** {volatility_str}\n"
+        f"{verdict}\n"
+    )
+
+    await processing_msg.edit_text(response, parse_mode="Markdown", reply_markup=main_menu_keyboard())
+
+    try:
+        await audit_log(context, user.id, user.username, user_msg, f"Gold analysis: {status}, Trend: {trend_str}, Bubble: {bubble_percentage:.2f}% (Source: {'Fresh' if not source_note else 'Database'})")
+    except Exception as e:
+        logger.error(f"Failed to log gold_analysis for user {user.id}: {e}")
 
     except Exception as e:
         logger.exception("Gold analysis failed")
         error_msg = "❌ خطا در دریافت اطلاعات. لطفاً دوباره تلاش کنید."
         if query:
-            await query.edit_message_text(error_msg, reply_markup=main_menu_keyboard())
+            await processing_msg.edit_text(error_msg, reply_markup=main_menu_keyboard())
         else:
             await processing_msg.edit_text(error_msg, reply_markup=main_menu_keyboard())
 
@@ -1422,44 +1448,67 @@ async def show_history_chart(update: Update, context: ContextTypes.DEFAULT_TYPE,
             await update.message.reply_text(error_msg)
 
 async def settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, query=None):
+    # Determine the user object and log message based on whether it came from a command or callback
     if query:
         user = query.from_user
-        user_msg = f"Settings refreshed after toggle (callback: {query.data})"
-    elif update:
-        user = update.effective_user
-        user_msg = update.message.text if update.message else "Settings accessed via command"
-    else:
-        logger.error("settings_menu called without update or query")
-        return
-
-    settings = get_user_settings(user.id)
-    response = (
-        "⚙️ **تنظیمات شما**\n"
-        f"🔔 اعلان‌ها: {'فعال' if settings['notifications'] else 'غیرفعال'}\n"
-        f"🟢 آستانه خرید: {settings['buy_threshold']:,} تومان\n"
-        f"🔴 آستانه فروش: {settings['wait_threshold']:,} تومان\n"
-        "\n**نوع اعلان‌ها:**\n"
-        f"{'🟢' if settings['notification_flags'] & NOTIF_BUY else '⚪️'} اعلان خرید\n"
-        f"{'🔴' if settings['notification_flags'] & NOTIF_SELL else '⚪️'} اعلان فروش\n"
-        f"{'📊' if settings['notification_flags'] & NOTIF_SIGNIFICANT_MOVE else '⚪️'} حرکت قیمت\n"
-        f"{'📅' if settings['notification_flags'] & NOTIF_SUMMARY else '⚪️'} خلاصه روزانه\n"
-    )
-
-    if query:
-        await query.edit_message_text(
-            response,
+        user_msg = f"Settings accessed via callback: {query.data}"
+        # Answer the query first
+        await query.answer()
+        # Prepare the message text
+        settings = get_user_settings(user.id)
+        response = (
+            "⚙️ **تنظیمات شما**\n"
+            f"🔔 اعلان‌ها: {'فعال' if settings['notifications'] else 'غیرفعال'}\n"
+            f"🟢 آستانه خرید: {settings['buy_threshold']:,} تومان\n"
+            f"🔴 آستانه فروش: {settings['wait_threshold']:,} تومان\n"
+            f"📊 آستانه حرکت قیمت: {settings['significant_move_threshold']:,} تومان\n\n"
+            "**نوع اعلان‌ها:**\n"
+            f"{'🟢' if settings['notification_flags'] & NOTIF_BUY else '⚪️'} اعلان خرید\n"
+            f"{'🔴' if settings['notification_flags'] & NOTIF_SELL else '⚪️'} اعلان فروش\n"
+            f"{'📊' if settings['notification_flags'] & NOTIF_SIGNIFICANT_MOVE else '⚪️'} حرکت قیمت\n"
+            f"{'📅' if settings['notification_flags'] & NOTIF_SUMMARY else '⚪️'} خلاصه روزانه\n"
+        )
+        # Send the new message
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=response,
             parse_mode="Markdown",
             reply_markup=settings_menu_keyboard(settings['notifications'], settings['notification_flags'])
         )
-    else:
+        try:
+            await query.delete_message()
+        except Exception as e:
+            logger.warning(f"Could not delete settings menu message: {e}")
+
+    elif update and update.message:
+        user = update.effective_user
+        user_msg = update.message.text
+        settings = get_user_settings(user.id)
+        response = (
+            "⚙️ **تنظیمات شما**\n"
+            f"🔔 اعلان‌ها: {'فعال' if settings['notifications'] else 'غیرفعال'}\n"
+            f"🟢 آستانه خرید: {settings['buy_threshold']:,} تومان\n"
+            f"🔴 آستانه فروش: {settings['wait_threshold']:,} تومان\n"
+            f"📊 آستانه حرکت قیمت: {settings['significant_move_threshold']:,} تومان\n"
+            ""
+            "**نوع اعلان‌ها:**\n"
+            f"{'🟢' if settings['notification_flags'] & NOTIF_BUY else '⚪️'} اعلان خرید\n"
+            f"{'🔴' if settings['notification_flags'] & NOTIF_SELL else '⚪️'} اعلان فروش\n"
+            f"{'📊' if settings['notification_flags'] & NOTIF_SIGNIFICANT_MOVE else '⚪️'} حرکت قیمت\n"
+            f"{'📅' if settings['notification_flags'] & NOTIF_SUMMARY else '⚪️'} خلاصه روزانه\n"
+        )
         await update.message.reply_text(
             response,
             parse_mode="Markdown",
             reply_markup=settings_menu_keyboard(settings['notifications'], settings['notification_flags'])
         )
+    else:
+        logger.error("settings_menu called without update or query")
+        return
 
+    # Audit log with proper error handling
     try:
-        await audit_log(context, user.id, user.username, user_msg, f"Settings accessed. Notifications: {settings['notifications']}, Buy Thresh: {settings['buy_threshold']}, Sell Thresh: {settings['wait_threshold']}")
+        await audit_log(context, user.id, user.username, user_msg, f"Settings accessed. Notifications: {settings['notifications']}, Buy Thresh: {settings['buy_threshold']}, Sell Thresh: {settings['wait_threshold']}, Significant Move Thresh: {settings['significant_move_threshold']}")
     except Exception as e:
         logger.error(f"Failed to log settings_menu for user {user.id}: {e}")
 
@@ -1487,18 +1536,22 @@ async def set_thresholds_start(query, user_id):
     )
 
 async def set_threshold_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle the callback for selecting buy/wait threshold to set"""
+    """Handle the callback for selecting buy/wait/significant_move threshold to set"""
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
     if query.data == "set_buy_threshold":
         context.user_data['setting_threshold'] = 'buy'
-        await query.edit_message_text("🟢 **آستانه خرید**\n"
-                                      "مقدار جدید را به تومان وارد کنید:")
+        await query.edit_message_text("🟢 **آستانه خرید**"
+                                  "مقدار جدید را به تومان وارد کنید:")
     elif query.data == "set_wait_threshold":
         context.user_data['setting_threshold'] = 'wait'
-        await query.edit_message_text("🔴 **آستانه فروش**\n"
-                                      "مقدار جدید را به تومان وارد کنید:")
+        await query.edit_message_text("🔴 **آستانه فروش**"
+                                  "مقدار جدید را به تومان وارد کنید:")
+    elif query.data == "set_significant_move_threshold":
+        context.user_data['setting_threshold'] = 'significant_move'
+        await query.edit_message_text("📊 **آستانه حرکت قیمت**"
+                                  "مقدار جدید را به تومان وارد کنید:")
     else:
         await query.edit_message_text("❌ خطای داخلی")
         return
@@ -1517,11 +1570,15 @@ async def set_threshold_value(update: Update, context: ContextTypes.DEFAULT_TYPE
         elif threshold_type == 'wait':
             update_user_settings(user.id, wait_threshold=value)
             success_msg = f"✅ آستانه فروش به {value:,} تومان تغییر کرد."
+        elif threshold_type == 'significant_move':
+            update_user_settings(user.id, significant_move_threshold=value)
+            success_msg = f"✅ آستانه حرکت قیمت به {value:,} تومان تغییر کرد."
         else:
             success_msg = "❌ خطای داخلی. دوباره تلاش کنید."
             logger.warning(f"User {user.id} tried to set threshold without selecting type first.")
 
         await update.message.reply_text(success_msg, reply_markup=main_menu_keyboard())
+
         # Audit log
         try:
             await audit_log(context, user.id, user.username, f"Set threshold {threshold_type} to {value:,}", success_msg)
@@ -1530,7 +1587,8 @@ async def set_threshold_value(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     except ValueError:
         await update.message.reply_text("❌ لطفاً یک عدد معتبر وارد کنید.", reply_markup=main_menu_keyboard())
-        return ASK_THRESHOLD_VALUE 
+        return ASK_THRESHOLD_VALUE
+
     except Exception as e:
         logger.exception("Setting threshold value failed")
         await update.message.reply_text("❌ خطا در تغییر آستانه. لطفاً دوباره تلاش کنید.", reply_markup=main_menu_keyboard())
@@ -1564,41 +1622,37 @@ async def about_us(update: Update, context: ContextTypes.DEFAULT_TYPE, query=Non
         await audit_log(context, user.id, user.username, user_msg, "About Us section accessed via /about command")
 
 async def help_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, query=None):
-    if query:
-        user = query.from_user
-        user_msg = f"Callback: {query.data}" 
-    else:
-        user = update.effective_user
-        user_msg = "Command: /help"
     response = (
         "📚 **راهنمای استفاده**\n"
         "**دستورات:**\n"
         "/start - شروع و منوی اصلی\n"
         "/gold - تحلیل بازار طلا\n"
-        "/chart - نمودار قیمت\n"
-        "/usdchart - نمودار قیمت دلار\n"
-        "/ouncechart - نمودار قیمت اونس\n"
+        "/chart - نمودار قیمت (طلا)\n"
+        "/usd_chart - نمودار قیمت دلار\n"
+        "/ounce_chart - نمودار قیمت اونس\n"
         "/settings - تنظیمات\n"
         "/calc - محاسبه گرم\n"
-        "/history - تاریخچه قیمت\n"
-        "/about - درباره ما\n" 
-        "\n**ویژگی‌ها:**\n"
-        "🔔 دریافت اعلان زمان خرید/فروش/حرکت قیمت\n"
+        "**ویژگی‌ها:**\n"
+        "🔔 دریافت اعلان زمان خرید/فروش/رصد\n"
         "📊 تحلیل لحظه‌ای بازار\n"
         "📈 نمودار روند قیمت\n"
         "🔍 تحلیل روند و شاخص‌های تکنیکال\n"
         "⚙️ تنظیمات شخصی‌سازی شده\n"
+        "👤 Bot creator: @b4bak"
     )
     if query:
-        await query.edit_message_text(response, parse_mode="Markdown", reply_markup=main_menu_keyboard())
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=response,
+            parse_mode="Markdown",
+            reply_markup=main_menu_keyboard()
+        )
+        try:
+            await query.delete_message()
+        except Exception as e:
+            logger.warning(f"Could not delete help menu message: {e}")
     else:
         await update.message.reply_text(response, parse_mode="Markdown", reply_markup=main_menu_keyboard())
-
-    try:
-        await audit_log(context, user.id, user.username, user_msg, "Help menu sent")
-    except Exception as e:
-        logger.error(f"Failed to log help_menu for user {user.id}: {e}")
-
 async def handle_chart_timeframe_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles the callback query for timeframe selection."""
     logger.info(f"handle_chart_timeframe_selection called. Query data: {update.callback_query.data}")
@@ -1701,7 +1755,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await audit_log(context, query.from_user.id, query.from_user.username, f"Callback: {query.data}", f"Button '{query.data}' pressed")
-
     await query.answer()
 
     if query.data == "gold":
@@ -1717,22 +1770,16 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "help":
         await help_menu(update, context, query)
     elif query.data == "main_menu":
-
-        try:
-            await query.delete_message()
-        except Exception as e:
-            logger.warning(f"Could not delete message for 'main_menu' callback: {e}. Attempting to edit instead.")
-            try:
-                await query.edit_message_text("منوی اصلی:", reply_markup=main_menu_keyboard())
-            except Exception as e2:
-                logger.error(f"Could not edit message for 'main_menu' callback either: {e2}")
-                return
-
+        # Send the main menu as a new message
         await context.bot.send_message(
             chat_id=query.message.chat_id,
             text="منوی اصلی:",
             reply_markup=main_menu_keyboard()
         )
+        try:
+            await query.delete_message()
+        except Exception as e:
+            logger.warning(f"Could not delete message: {e}")
     elif query.data == "toggle_notif":
         await toggle_notifications(query, query.from_user.id)
     elif query.data.startswith("toggle_notif_"):
@@ -1758,7 +1805,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         logger.info(f"button_callback: No specific handler found for query data '{query.data}'.")
 
-
 # ================= CALC CONVERSATION =================
 async def calc_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -1769,33 +1815,53 @@ async def calc_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def calc_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    user_input = update.message.text
     try:
-        money = int(user_input.replace(",", ""))
-        tala, ounce = fetch_and_parse_gold()
-        usd_toman = fetch_and_parse_usd()
-        fair_price = usd_toman * ounce / 41.5
-        response = (
-            f"📊 **محاسبه با {money:,} تومان**\n"
-            f"🏷 بازار: {money / tala:.2f} گرم\n"
-            f"⚖️ منصفانه: {money / fair_price:.2f} گرم\n"
-        )
-        await update.message.reply_text(response, parse_mode="Markdown", reply_markup=main_menu_keyboard())
+        amount_toman = int(update.message.text.replace(",", ""))
+        if amount_toman <= 0:
+            await update.message.reply_text("❌ مقدار وارد شده باید بزرگتر از صفر باشد.", reply_markup=main_menu_keyboard())
+            return
+
+        calc_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         try:
-            await audit_log(context, user.id, user.username, f"calc: {money:,}", f"Calculation result: {money / fair_price:.2f} grams at fair price")
+            current_price_per_gram, _ = fetch_and_parse_gold()
+            source = "لحظه‌ای"
+        except Exception:
+            logger.warning("Calc: Real-time data fetch failed, using database.")
+            conn = sqlite3.connect('gold_bot.db')
+            c = conn.cursor()
+            c.execute('SELECT tala_price FROM price_history ORDER BY timestamp DESC LIMIT 1')
+            result = c.fetchone()
+            conn.close()
+            if result:
+                current_price_per_gram = result[0]
+                source = "آخرین دادهٔ ذخیره شده"
+            else:
+                raise RuntimeError("هیچ داده‌ای برای محاسبه موجود نیست.")
+
+        grams = amount_toman / current_price_per_gram
+        response = (
+            f"💰 **محاسبه گرم طلا**\n"
+            f"🕒 **زمان محاسبه:** {calc_time_str}\n"
+            f"📥 مبلغ ورودی: {amount_toman:,} تومان\n"
+            f"🏷 قیمت هر گرم (منبع: {source}): {current_price_per_gram:,} تومان\n"
+            f"⚖️ مقدار محاسبه شده (گرم): {grams:.4f}\n"
+        )
+
+        await update.message.reply_text(response, parse_mode="Markdown", reply_markup=main_menu_keyboard())
+
+        # Audit log
+        try:
+            await audit_log(context, user.id, user.username, f"Calc: {amount_toman:,} Toman -> {grams:.4f} Grams (Source: {source})", f"Calculation successful. Source: {source}")
         except Exception as e:
             logger.error(f"Failed to log calc_amount for user {user.id}: {e}")
 
     except ValueError:
-        await update.message.reply_text("❌ عدد معتبر وارد کنید", reply_markup=main_menu_keyboard())
-        await audit_log(context, user.id, user.username, f"calc input: {user_input}", "Invalid number entered for calc")
+        await update.message.reply_text("❌ لطفاً یک عدد معتبر وارد کنید.", reply_markup=main_menu_keyboard())
     except Exception as e:
         logger.exception("Calc failed")
-        await update.message.reply_text("❌ خطا در دریافت اطلاعات. لطفاً دوباره تلاش کنید.", reply_markup=main_menu_keyboard())
-
-    context.user_data.pop('waiting_for_calc', None)
-    return ConversationHandler.END
+        error_msg = "❌ خطا در دریافت اطلاعات. لطفاً دوباره تلاش کنید."
+        await update.message.reply_text(error_msg, reply_markup=main_menu_keyboard())
 
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle regular text messages - check if waiting for calc input or threshold value, otherwise log as unhandled text"""
@@ -2324,6 +2390,7 @@ async def admin_broadcast_send(update: Update, context: ContextTypes.DEFAULT_TYP
     return ConversationHandler.END
 
 # ================= PRICE MONITORING =================
+# Inside the monitor_prices function loop
 async def monitor_prices(context: ContextTypes.DEFAULT_TYPE):
     """Background task to monitor prices and send alerts"""
     try:
@@ -2331,26 +2398,23 @@ async def monitor_prices(context: ContextTypes.DEFAULT_TYPE):
         usd_toman = fetch_and_parse_usd()
 
         logger.info(f"Monitor Prices - Fetched Raw Tala: {tala}, Raw USD (Toman): {usd_toman}, Raw Ounce: {ounce}")
-
         all_users = get_all_users_with_notifications()
 
+        analysis_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
         for user_tuple in all_users:
-            user_id, flags, buy_thresh, wait_thresh = user_tuple
-            logger.debug(f"Monitor Prices - Checking user {user_id} with thresholds Buy: {buy_thresh}, Wait: {wait_thresh} (in Toman)")
+            user_id, flags, buy_thresh, wait_thresh, sig_move_thresh = user_tuple
 
-            fair, var, verdict, emoji, status = analyze_market(
-                tala, usd_toman, ounce,
-                buy_thresh,
-                wait_thresh
-            )
+            fair = usd_toman * ounce / 41.5
+            var = tala - fair
 
-            save_price_history(tala, usd_toman, ounce, fair, var)
+            logger.debug(f"Monitor Prices - User {user_id}: Calculated Fair: {fair:.2f}, Diff (Var): {var:.2f}")
 
-            logger.debug(f"Monitor Prices - User {user_id}: Calculated Fair: {fair:.2f}, Diff (Var): {var:.2f}, Status: {status}")
-
-            if flags & NOTIF_BUY and var < buy_thresh and var <= 0:
+            verdict, emoji, status = determine_verdict(var, buy_thresh, wait_thresh)
+            if flags & NOTIF_BUY and var < 0 and abs(var) > buy_thresh:
                 alert_msg = (
                     f"🔔 **هشدار خرید!**\n"
+                    f"🕒 **زمان تحلیل:** {analysis_time_str}\n"
                     f"{verdict}\n"
                     f"📊 اختلاف قیمت: {int(var):,} تومان\n"
                     f"🏷 قیمت بازار: {tala:,} تومان\n"
@@ -2368,31 +2432,32 @@ async def monitor_prices(context: ContextTypes.DEFAULT_TYPE):
                 except Exception as e:
                     logger.warning(f"Alert send failed for user {user_id}: {e}")
 
-            if flags & NOTIF_SELL and status == "SELL":
-                if var > wait_thresh:
-                    alert_msg = (
-                        f"🔔 **هشدار فروش!**\n"
-                        f"{verdict}\n"
-                        f"📊 اختلاف قیمت: {int(var):,} تومان\n"
-                        f"🏷 قیمت بازار: {tala:,} تومان\n"
-                        f"⚖️ قیمت جهانی (تومان): {int(fair):,} تومان\n"
-                        "برای جزئیات بیشتر /gold را بزنید"
+            if flags & NOTIF_SELL and var > 0 and var > wait_thresh:
+                alert_msg = (
+                    f"🔔 **هشدار فروش!**\n"
+                    f"🕒 **زمان تحلیل:** {analysis_time_str}\n"
+                    f"{verdict}\n"
+                    f"📊 اختلاف قیمت: {int(var):,} تومان\n"
+                    f"🏷 قیمت بازار: {tala:,} تومان\n"
+                    f"⚖️ قیمت جهانی (تومان): {int(fair):,} تومان\n"
+                    "برای جزئیات بیشتر /gold را بزنید"
+                )
+                try:
+                    await context.bot.send_message(
+                        chat_id=user_id,
+                        text=alert_msg,
+                        parse_mode="Markdown"
                     )
-                    try:
-                        await context.bot.send_message(
-                            chat_id=user_id,
-                            text=alert_msg,
-                            parse_mode="Markdown"
-                        )
-                        logger.info(f"SELL Alert sent to user {user_id}")
-                        await asyncio.sleep(0.05)
-                    except Exception as e:
-                        logger.warning(f"Alert send failed for user {user_id}: {e}")
+                    logger.info(f"SELL Alert sent to user {user_id}")
+                    await asyncio.sleep(0.05)
+                except Exception as e:
+                    logger.warning(f"Alert send failed for user {user_id}: {e}")
 
             if flags & NOTIF_SIGNIFICANT_MOVE:
-                if abs(var) > 700000 and var > 0:
+                if abs(var) > sig_move_thresh and var > 0:
                     alert_msg = (
                         f"🔔 **حرکت قیمت مهم!**\n"
+                        f"🕒 **زمان تحلیل:** {analysis_time_str}\n"
                         f"📊 اختلاف قیمت: {int(var):,} تومان\n"
                         f"🏷 قیمت بازار: {tala:,} تومان\n"
                         f"⚖️ قیمت جهانی (تومان): {int(fair):,} تومان\n"
@@ -2411,6 +2476,15 @@ async def monitor_prices(context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         logger.exception("Price monitoring failed")
+
+def determine_verdict(var, buy_thresh, wait_thresh):
+    """Determine the verdict, emoji, and status based on var and thresholds."""
+    if var < buy_thresh:
+        return "\n✅ زمان خرید طلاست!", "🟢", "BUY"
+    elif var < wait_thresh:
+        return "\n🟡 همچنان صبر کنید", "🟡", "WAIT"
+    else:
+        return "\n🔴 زمان فروش طلاست!", "🔴", "SELL"
 
 # ================= MAIN =================
 def main():
@@ -2431,12 +2505,15 @@ def main():
     app.add_handler(CommandHandler("test_audit", test_audit))
     app.add_handler(CommandHandler("health", admin_health_check))
 
-    # Broadcast conversation
-    app.add_handler(ConversationHandler(
-        entry_points=[CommandHandler("broadcast", admin_broadcast_start)],
-        states={ASK_BROADCAST: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_broadcast_send)]},
-        fallbacks=[]
-    ))
+    threshold_conv_handler = ConversationHandler(
+    entry_points=[CallbackQueryHandler(set_threshold_type, pattern='^set_(buy|wait|significant_move)_threshold$')], # Update pattern
+    states={
+        ASK_THRESHOLD_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_threshold_value)],
+        ASK_THRESHOLD_TYPE_SIGNIFICANT_MOVE: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_threshold_value)]
+    },
+    fallbacks=[CallbackQueryHandler(lambda u, c: settings_menu(u, c, query=u.callback_query), pattern='^settings$')]
+    )
+    app.add_handler(threshold_conv_handler)
 
     # Calc conversation
     app.add_handler(ConversationHandler(
