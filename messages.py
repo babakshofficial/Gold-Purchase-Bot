@@ -492,10 +492,14 @@ def portfolio_daily_report(
     tala_price: int,
     usd_toman: float,
 ) -> str:
+    gold_value_toman = gold_grams * tala_price
+    usd_value_toman = cash_usd * usd_toman
     return (
         f"📊 **گزارش روزانه دارایی**\n"
         f"📅 {date_str}\n\n"
-        f"🥇 {gold_grams:.2f} گرم | 💵 {cash_toman:,} تومان | 💲 ${cash_usd:,.2f}\n\n"
+        f"🥇 طلا: {gold_grams:.2f} گرم — **{gold_value_toman:,.0f}** تومان\n"
+        f"💵 نقد (تومان): **{cash_toman:,}** تومان\n"
+        f"💲 نقد (دلار): ${cash_usd:,.2f} — **{usd_value_toman:,.0f}** تومان\n\n"
         "**💰 ارزش امروز**\n"
         f"🇮🇷 {total_toman:,.0f} تومان\n"
         f"🌐 ${total_usd:,.2f}\n\n"
