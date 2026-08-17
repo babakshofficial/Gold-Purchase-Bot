@@ -14,6 +14,7 @@ A Python-based Telegram bot designed to analyze gold prices based on global USD 
 *   **Trend Analysis:** Calculates and displays price trends (UPWARD/DOWNWARD/FLAT) and volatility based on recent data (last 6 hours).
 *   **Technical Indicators:** Calculates a simplified Relative Strength Index (RSI).
 *   **User Settings:** Allows users to manage notification preferences and thresholds.
+*   **Portfolio Tracking:** Users can register gold grams plus Toman/USD cash and receive daily value and P/L reports.
 *   **Admin Panel:** Provides administrators with statistics, user management, database tools, and broadcasting capabilities.
 *   **Audit Logging:** Logs user interactions to a private Telegram channel for analysis.
 *   **Crawler Service:** A separate service (`crawler_service.py`) fetches and stores price data with technical indicators every 10 minutes for efficient charting and historical analysis.
@@ -84,6 +85,7 @@ A Python-based Telegram bot designed to analyze gold prices based on global USD 
 *   `/history`: Access the history menu to view charts for different timeframes.
 *   `/settings`: Manage notification preferences and thresholds.
 *   `/calc`: Start the gold calculation conversation (enter amount in Toman).
+*   `/portfolio`: Register and track gold, Toman cash, and USD holdings with daily P/L reports.
 *   `/help`: Show the help menu.
 *   `/about`: Display information about the bot, sources, and creator.
 *   `/admin`: Access the admin panel (admin only).
