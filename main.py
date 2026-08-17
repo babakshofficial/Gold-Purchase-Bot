@@ -50,6 +50,8 @@ from plotting import (
     LBL_USER_GROWTH,
     LBL_PRICE_DIFF_TREND,
     LBL_DAYS_AGO,
+    CRYPTO_SYMBOL_LABELS,
+    LBL_CRYPTO_TOMAN,
     fa_period_title,
     persian_legend,
     set_persian_title,
@@ -62,6 +64,7 @@ from io import BytesIO
 import numpy as np 
 from telegram.helpers import escape_markdown 
 import messages as msg
+from crypto_fetch import fetch_crypto_prices, STAGE1_SYMBOLS, CRYPTO_CHANNEL_USERNAME
 
 load_dotenv()
 # ================= LOGGING =================
@@ -113,6 +116,7 @@ NAV_MAIN = "main_menu"
 NAV_SETTINGS = "settings"
 NAV_HISTORY = "history_menu"
 NAV_PORTFOLIO = "portfolio"
+NAV_CRYPTO = "crypto_menu"
 NAV_THRESHOLDS = "set_thresholds"
 NAV_ADMIN = "admin_menu"
 NAV_ADMIN_CHARTS = "admin_charts"
@@ -188,9 +192,23 @@ def _migrate_users_columns(c):
         except sqlite3.OperationalError:
             pass
 
-init_db()
+    c.execute('''CREATE TABLE IF NOT EXISTS crypto_price_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        symbol TEXT NOT NULL,
+        usd_price REAL,
+        toman_price REAL,
+        change_24h_pct REAL,
+        source TEXT
+    )''')
+    try:
+        c.execute(
+            'CREATE INDEX IF NOT EXISTS idx_crypto_symbol_ts ON crypto_price_history (symbol, timestamp)'
+        )
+    except sqlite3.OperationalError:
+        pass
 
-# ================= DATABASE HELPERS =================
+init_db()
 def add_or_update_user(user_id, username, first_name):
     conn = sqlite3.connect('gold_bot.db')
     c = conn.cursor()
@@ -351,6 +369,118 @@ def save_price_history(tala, usd_raw_toman, ounce_raw_usd, fair, diff):
                  VALUES (?, ?, ?, ?, ?)''', (tala, usd_raw_toman, ounce_raw_usd, fair, diff))
     conn.commit()
     conn.close()
+
+
+def save_crypto_price_history(prices: dict):
+    """Save a snapshot of crypto prices (one row per symbol)."""
+    if not prices:
+        return
+    conn = sqlite3.connect('gold_bot.db')
+    c = conn.cursor()
+    for symbol, data in prices.items():
+        c.execute(
+            '''INSERT INTO crypto_price_history
+               (symbol, usd_price, toman_price, change_24h_pct, source)
+               VALUES (?, ?, ?, ?, ?)''',
+            (
+                symbol,
+                data.get("usd"),
+                data.get("toman"),
+                data.get("change_24h_pct"),
+                data.get("source"),
+            ),
+        )
+    conn.commit()
+    conn.close()
+
+
+def get_crypto_price_history(symbol: str, start_time: str, end_time: str):
+    conn = sqlite3.connect('gold_bot.db')
+    c = conn.cursor()
+    c.execute(
+        '''SELECT timestamp, toman_price, usd_price, change_24h_pct, source
+           FROM crypto_price_history
+           WHERE symbol = ? AND timestamp BETWEEN ? AND ?
+           ORDER BY timestamp ASC''',
+        (symbol, start_time, end_time),
+    )
+    results = c.fetchall()
+    conn.close()
+    return results
+
+
+def get_latest_crypto_prices() -> dict:
+    """Latest stored price per symbol."""
+    conn = sqlite3.connect('gold_bot.db')
+    c = conn.cursor()
+    result = {}
+    for symbol in STAGE1_SYMBOLS:
+        c.execute(
+            '''SELECT usd_price, toman_price, change_24h_pct, source, timestamp
+               FROM crypto_price_history
+               WHERE symbol = ?
+               ORDER BY timestamp DESC LIMIT 1''',
+            (symbol,),
+        )
+        row = c.fetchone()
+        if row:
+            result[symbol] = {
+                "usd": row[0],
+                "toman": row[1],
+                "change_24h_pct": row[2],
+                "source": row[3],
+                "timestamp": row[4],
+            }
+    conn.close()
+    return result
+
+
+def fetch_current_crypto_prices():
+    """Fetch live crypto prices or fall back to latest DB records."""
+    usd_toman = None
+    try:
+        usd_toman = fetch_and_parse_usd()
+    except Exception:
+        try:
+            conn = sqlite3.connect('gold_bot.db')
+            c = conn.cursor()
+            c.execute('SELECT usd_price FROM price_history ORDER BY timestamp DESC LIMIT 1')
+            row = c.fetchone()
+            conn.close()
+            if row and row[0]:
+                usd_toman = row[0]
+        except Exception:
+            pass
+
+    try:
+        prices = fetch_crypto_prices(usd_toman=usd_toman)
+        if prices:
+            return prices, False
+    except Exception:
+        logger.exception("Live crypto fetch failed")
+
+    latest = get_latest_crypto_prices()
+    if latest:
+        return latest, True
+    raise RuntimeError("No crypto price data available")
+
+
+def export_crypto_price_history_to_csv(days=7):
+    conn = sqlite3.connect('gold_bot.db')
+    c = conn.cursor()
+    c.execute(
+        '''SELECT timestamp, symbol, usd_price, toman_price, change_24h_pct, source
+           FROM crypto_price_history
+           WHERE timestamp >= datetime('now', '-' || ? || ' days')
+           ORDER BY timestamp DESC''',
+        (days,),
+    )
+    rows = c.fetchall()
+    conn.close()
+    csv_content = "timestamp,symbol,usd_price,toman_price,change_24h_pct,source\n"
+    for row in rows:
+        csv_content += ",".join(str(x) if x is not None else "" for x in row) + "\n"
+    return csv_content
 
 def get_price_history(limit=24):
     """Fetch price history - Updated to include raw USD and Ounce"""
@@ -1078,6 +1208,31 @@ def generate_detailed_history_chart(start_time, end_time):
     plt.setp(ax2.get_xticklabels(), rotation=45)
     return finalize_chart(fig)
 
+
+def generate_crypto_price_chart(symbol: str, start_time, end_time):
+    """Generate Toman price chart for a crypto symbol."""
+    if isinstance(start_time, str):
+        start_time = datetime.fromisoformat(start_time)
+    if isinstance(end_time, str):
+        end_time = datetime.fromisoformat(end_time)
+
+    history = get_crypto_price_history(symbol, start_time.isoformat(), end_time.isoformat())
+    if len(history) < 2:
+        return None
+
+    timestamps = [datetime.fromisoformat(h[0]) for h in history]
+    toman_prices = [h[1] for h in history]
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.plot(timestamps, toman_prices, marker='o', linewidth=2, color='#F7931A')
+    set_persian_xlabel(ax, LBL_TIME)
+    set_persian_ylabel(ax, LBL_CRYPTO_TOMAN)
+    label = CRYPTO_SYMBOL_LABELS.get(symbol, symbol)
+    set_persian_title(ax, f"{label} ({symbol})")
+    ax.grid(True, alpha=0.3)
+    plt.setp(ax.get_xticklabels(), rotation=45)
+    return finalize_chart(fig)
+
 # ================= AUDIT LOGGING =================
 async def audit_log(context: ContextTypes.DEFAULT_TYPE, user_id, username, command, response_summary):
     """Audit logging with command and response summary"""
@@ -1233,6 +1388,8 @@ async def show_menu(context: ContextTypes.DEFAULT_TYPE, chat_id: int, menu_id: s
         )
     elif menu_id == NAV_PORTFOLIO:
         await send_portfolio_view(context, chat_id, user)
+    elif menu_id == NAV_CRYPTO:
+        await send_crypto_prices(context, chat_id)
     elif menu_id == NAV_ADMIN:
         if is_admin(user.id):
             await context.bot.send_message(
@@ -1285,7 +1442,7 @@ async def show_menu(context: ContextTypes.DEFAULT_TYPE, chat_id: int, menu_id: s
     elif menu_id == "about_us":
         await context.bot.send_message(
             chat_id,
-            msg.about_message(USD_CHANNEL_USERNAME, GOLD_CHANNEL_USERNAME),
+            msg.about_message(USD_CHANNEL_USERNAME, GOLD_CHANNEL_USERNAME, CRYPTO_CHANNEL_USERNAME),
             parse_mode="Markdown",
             reply_markup=kb_back(NAV_MAIN),
         )
@@ -1336,6 +1493,7 @@ def main_menu_keyboard():
         [InlineKeyboardButton(msg.BTN_ANALYSIS, callback_data="gold")],
         [InlineKeyboardButton(msg.BTN_CALC, callback_data="calc")],
         [InlineKeyboardButton(msg.BTN_PORTFOLIO, callback_data="portfolio")],
+        [InlineKeyboardButton(msg.BTN_CRYPTO, callback_data="crypto_menu")],
         [InlineKeyboardButton(msg.BTN_CHART_GOLD, callback_data="chart")],
         [InlineKeyboardButton(msg.BTN_CHART_USD, callback_data="usd_chart")],
         [InlineKeyboardButton(msg.BTN_CHART_OUNCE, callback_data="ounce_chart")],
@@ -1394,6 +1552,34 @@ def history_menu_keyboard():
         [InlineKeyboardButton(msg.BTN_HISTORY_7D, callback_data="history_7d")],
         [InlineKeyboardButton(msg.BTN_HISTORY_30D, callback_data="history_30d")],
         back_row(NAV_MAIN),
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+def crypto_menu_keyboard():
+    keyboard = [
+        [InlineKeyboardButton("🔄 به‌روزرسانی قیمت", callback_data="crypto_refresh")],
+        [
+            InlineKeyboardButton(msg.BTN_CRYPTO_BTC, callback_data="crypto_chart:BTC"),
+            InlineKeyboardButton(msg.BTN_CRYPTO_ETH, callback_data="crypto_chart:ETH"),
+        ],
+        [
+            InlineKeyboardButton(msg.BTN_CRYPTO_TRX, callback_data="crypto_chart:TRX"),
+            InlineKeyboardButton(msg.BTN_CRYPTO_USDT, callback_data="crypto_chart:USDT"),
+        ],
+        back_row(NAV_MAIN),
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+def crypto_chart_timeframe_keyboard(symbol: str):
+    keyboard = [
+        [
+            InlineKeyboardButton(msg.BTN_HISTORY_24H, callback_data=f"crypto_tf:{symbol}:24h"),
+            InlineKeyboardButton(msg.BTN_HISTORY_7D, callback_data=f"crypto_tf:{symbol}:7d"),
+        ],
+        [InlineKeyboardButton(msg.BTN_HISTORY_30D, callback_data=f"crypto_tf:{symbol}:30d")],
+        back_row(NAV_CRYPTO),
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -1641,6 +1827,139 @@ async def show_history_chart(update: Update, context: ContextTypes.DEFAULT_TYPE,
         else:
             await update.message.reply_text(error_msg)
 
+
+async def send_crypto_prices(context: ContextTypes.DEFAULT_TYPE, chat_id: int, reply_markup=None):
+    """Fetch and send live crypto prices."""
+    try:
+        prices, stale = fetch_current_crypto_prices()
+    except Exception:
+        await context.bot.send_message(
+            chat_id, msg.ERROR_FETCH, parse_mode="Markdown", reply_markup=kb_back(NAV_MAIN)
+        )
+        return
+
+    missing = [s for s in STAGE1_SYMBOLS if s not in prices]
+    fetched_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    text = msg.crypto_prices_message(prices, fetched_at, stale=stale, missing=missing or None)
+    await context.bot.send_message(
+        chat_id,
+        text,
+        parse_mode="Markdown",
+        reply_markup=reply_markup or crypto_menu_keyboard(),
+    )
+
+
+async def crypto_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, query=None):
+    """Open crypto hub with live prices."""
+    if query:
+        user = query.from_user
+        await query.answer()
+        await delete_message_safe(query.message)
+        chat_id = query.message.chat_id
+    else:
+        user = update.effective_user
+        chat_id = update.message.chat_id
+
+    add_or_update_user(user.id, user.username, user.first_name)
+    await send_crypto_prices(context, chat_id)
+
+
+async def crypto_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE, query):
+    """Refresh crypto prices in place."""
+    await query.answer("در حال به‌روزرسانی...")
+    try:
+        prices, stale = fetch_current_crypto_prices()
+    except Exception:
+        await query.edit_message_text(msg.ERROR_FETCH, reply_markup=kb_back(NAV_MAIN))
+        return
+
+    missing = [s for s in STAGE1_SYMBOLS if s not in prices]
+    fetched_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    text = msg.crypto_prices_message(prices, fetched_at, stale=stale, missing=missing or None)
+    await query.edit_message_text(text, parse_mode="Markdown", reply_markup=crypto_menu_keyboard())
+
+
+async def crypto_chart_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, query):
+    """Show timeframe selection for a crypto symbol chart."""
+    await query.answer()
+    symbol = query.data.split(":", 1)[1]
+    if symbol not in STAGE1_SYMBOLS:
+        await query.answer(msg.ERROR_INTERNAL, show_alert=True)
+        return
+    context.user_data["crypto_chart_symbol"] = symbol
+    label = msg.CRYPTO_NAMES.get(symbol, ("", symbol))[1]
+    await query.edit_message_text(
+        f"📈 **نمودار {label} ({symbol})**\n{msg.CRYPTO_SELECT_CHART}",
+        parse_mode="Markdown",
+        reply_markup=crypto_chart_timeframe_keyboard(symbol),
+    )
+
+
+async def show_crypto_chart(update: Update, context: ContextTypes.DEFAULT_TYPE, query):
+    """Generate and send a crypto price chart."""
+    await query.answer()
+    parts = query.data.split(":")
+    if len(parts) != 3:
+        await query.answer(msg.ERROR_INTERNAL, show_alert=True)
+        return
+
+    symbol, timeframe = parts[1], parts[2]
+    if symbol not in STAGE1_SYMBOLS:
+        await query.answer(msg.ERROR_INTERNAL, show_alert=True)
+        return
+
+    now = datetime.now()
+    if timeframe == "24h":
+        start_time = (now - timedelta(hours=24)).isoformat()
+        suffix = "(۲۴ ساعت اخیر)"
+    elif timeframe == "7d":
+        start_time = (now - timedelta(days=7)).isoformat()
+        suffix = "(۷ روز اخیر)"
+    elif timeframe == "30d":
+        start_time = (now - timedelta(days=30)).isoformat()
+        suffix = "(۳۰ روز اخیر)"
+    else:
+        await query.answer("❌ بازه زمانی نامعتبر", show_alert=True)
+        return
+
+    end_time = now.isoformat()
+    chart = generate_crypto_price_chart(symbol, start_time, end_time)
+    caption = msg.chart_caption_crypto(symbol, suffix)
+
+    if chart is None:
+        await query.edit_message_text(
+            msg.CHART_INSUFFICIENT_DATA,
+            reply_markup=kb_back(NAV_CRYPTO),
+        )
+        return
+
+    await delete_message_safe(query.message)
+    await context.bot.send_photo(
+        chat_id=query.message.chat_id,
+        photo=chart,
+        caption=caption,
+        reply_markup=kb_back(NAV_CRYPTO),
+    )
+
+
+def persist_crypto_snapshots():
+    """Fetch and store crypto prices (non-blocking helper for scheduled job)."""
+    try:
+        usd_toman = None
+        try:
+            usd_toman = fetch_and_parse_usd()
+        except Exception:
+            pass
+        prices = fetch_crypto_prices(usd_toman=usd_toman)
+        if prices:
+            save_crypto_price_history(prices)
+            logger.info(f"Saved crypto snapshot: {list(prices.keys())}")
+        else:
+            logger.warning("Crypto snapshot empty; nothing saved")
+    except Exception:
+        logger.exception("Failed to persist crypto snapshots")
+
+
 async def settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, query=None):
     if query:
         user = query.from_user
@@ -1760,7 +2079,7 @@ async def about_us(update: Update, context: ContextTypes.DEFAULT_TYPE, query=Non
         user = update.effective_user
         user_msg = "/about"
         await update.message.reply_text(
-            msg.about_message(USD_CHANNEL_USERNAME, GOLD_CHANNEL_USERNAME),
+            msg.about_message(USD_CHANNEL_USERNAME, GOLD_CHANNEL_USERNAME, CRYPTO_CHANNEL_USERNAME),
             parse_mode="Markdown",
             reply_markup=kb_back(NAV_MAIN),
         )
@@ -1882,6 +2201,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await about_us(update, context, query)
     elif query.data == "help":
         await help_menu(update, context, query)
+    elif query.data == "crypto_menu":
+        await crypto_menu(update, context, query)
+    elif query.data == "crypto_refresh":
+        await crypto_refresh(update, context, query)
+    elif query.data.startswith("crypto_chart:"):
+        await crypto_chart_menu(update, context, query)
+    elif query.data.startswith("crypto_tf:"):
+        await show_crypto_chart(update, context, query)
     elif query.data == "main_menu":
         await navigate_back(update, context, NAV_MAIN)
     elif query.data == "toggle_notif":
@@ -2236,6 +2563,8 @@ def admin_export_keyboard():
         [InlineKeyboardButton("👥 خروجی کاربران (CSV)", callback_data="export_users")],
         [InlineKeyboardButton("💰 خروجی قیمت‌ها 7 روز", callback_data="export_prices_7")],
         [InlineKeyboardButton("💰 خروجی قیمت‌ها 30 روز", callback_data="export_prices_30")],
+        [InlineKeyboardButton("🪙 خروجی ارز دیجیتال 7 روز", callback_data="export_crypto_7")],
+        [InlineKeyboardButton("🪙 خروجی ارز دیجیتال 30 روز", callback_data="export_crypto_30")],
         back_row(NAV_ADMIN),
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -2302,11 +2631,30 @@ async def admin_health_check(update: Update, context: ContextTypes.DEFAULT_TYPE,
         health_status.append(f"❌ دیتابیس: خطا - {e}")
 
     try:
-        tala, ounce = fetch_and_parse_gold(max_attempts=3)
-        usd_toman = fetch_and_parse_usd(max_attempts=3)
+        tala, ounce = fetch_and_parse_gold()
+        usd_toman = fetch_and_parse_usd()
         health_status.append(f"✅ جذب داده: موفق (USD: {usd_toman:.0f}, Gold: {tala}, Ounce: {ounce})")
     except Exception as e:
         health_status.append(f"❌ جذب داده: خطا - {e}")
+
+    try:
+        usd_for_crypto = None
+        try:
+            usd_for_crypto = fetch_and_parse_usd()
+        except Exception:
+            pass
+        crypto_prices = fetch_crypto_prices(usd_toman=usd_for_crypto)
+        crypto_parts = []
+        for symbol in STAGE1_SYMBOLS:
+            if symbol in crypto_prices:
+                p = crypto_prices[symbol]
+                toman = p.get("toman")
+                crypto_parts.append(f"{symbol}: {int(toman):,}" if toman else f"{symbol}: OK")
+            else:
+                crypto_parts.append(f"{symbol}: missing")
+        health_status.append("✅ ارز دیجیتال: " + ", ".join(crypto_parts))
+    except Exception as e:
+        health_status.append(f"❌ ارز دیجیتال: خطا - {e}")
 
     try:
         if PRIVATE_CHANNEL_ID:
@@ -2504,6 +2852,15 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         else:
             response = "💰 **آمار قیمت‌ها**\nداده‌ای موجود نیست."
 
+        latest_crypto = get_latest_crypto_prices()
+        if latest_crypto:
+            response += "\n\n**آخرین قیمت ارزهای دیجیتال:**\n"
+            for symbol in STAGE1_SYMBOLS:
+                entry = latest_crypto.get(symbol)
+                if entry and entry.get("toman"):
+                    src = entry.get("source", "")
+                    response += f"• {symbol}: {int(entry['toman']):,} تومان ({src})\n"
+
         await query.edit_message_text(response, parse_mode="Markdown", reply_markup=admin_keyboard())
 
     elif query.data == "admin_charts":
@@ -2628,6 +2985,20 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
             document=file,
             filename=file.name,
             caption=f"💰 خروجی قیمت‌ها ({days} روز اخیر)"
+        )
+        await query.message.reply_text("✅ فایل ارسال شد", reply_markup=admin_export_keyboard())
+    elif query.data.startswith("export_crypto_"):
+        days = int(query.data.split("_")[-1])
+        await query.answer("در حال آماده‌سازی...")
+        csv_data = export_crypto_price_history_to_csv(days)
+        from io import BytesIO
+        file = BytesIO(csv_data.encode('utf-8'))
+        file.name = f"crypto_{days}d_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        await context.bot.send_document(
+            chat_id=query.message.chat_id,
+            document=file,
+            filename=file.name,
+            caption=f"🪙 خروجی ارز دیجیتال ({days} روز اخیر)",
         )
         await query.message.reply_text("✅ فایل ارسال شد", reply_markup=admin_export_keyboard())
     elif query.data == "admin_broadcast_menu":
@@ -2760,6 +3131,8 @@ async def monitor_prices(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.exception("Price monitoring failed")
 
+    persist_crypto_snapshots()
+
 def determine_verdict(var, buy_thresh, wait_thresh):
     """Determine the verdict, emoji, and status based on var and thresholds."""
     if var < buy_thresh:
@@ -2780,6 +3153,7 @@ def main():
     app.add_handler(CommandHandler("settings", lambda u, c: settings_menu(u, c)))
     app.add_handler(CommandHandler("help", lambda u, c: help_menu(u, c)))
     app.add_handler(CommandHandler("about", lambda u, c: about_us(u, c)))
+    app.add_handler(CommandHandler("crypto", lambda u, c: crypto_menu(u, c)))
 
     portfolio_conv_handler = ConversationHandler(
         entry_points=[

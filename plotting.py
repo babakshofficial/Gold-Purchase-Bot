@@ -102,6 +102,14 @@ LBL_PRICE_DIFF_TREND = "روند اختلاف قیمت"
 LBL_LAST_HOURS = "۲۴ ساعت اخیر"
 LBL_DAYS_AGO = "روز اخیر"
 
+CRYPTO_SYMBOL_LABELS = {
+    "BTC": "بیت‌کوین",
+    "ETH": "اتریوم",
+    "TRX": "ترون",
+    "USDT": "تتر",
+}
+LBL_CRYPTO_TOMAN = "قیمت تومان"
+
 
 def persian_legend(ax=None, **kwargs):
     """Legend with Persian font on label text."""

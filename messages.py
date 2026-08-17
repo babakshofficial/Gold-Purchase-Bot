@@ -13,6 +13,7 @@ BTN_CHART_OUNCE = "📈 نمودار اونس"
 BTN_HISTORY = "🔍 تاریخچه قیمت"
 BTN_SETTINGS = "⚙️ تنظیمات"
 BTN_PORTFOLIO = "💼 دارایی من"
+BTN_CRYPTO = "🪙 ارزهای دیجیتال"
 BTN_ABOUT = "ℹ️ درباره ما"
 BTN_HELP = "📚 راهنما"
 BTN_BACK = "🔙 بازگشت"
@@ -26,6 +27,11 @@ BTN_SET_THRESHOLDS = "🎚 تنظیم آستانه‌ها"
 BTN_HISTORY_24H = "📈 ۲۴ ساعت اخیر"
 BTN_HISTORY_7D = "📊 ۷ روز اخیر"
 BTN_HISTORY_30D = "📈 ۳۰ روز اخیر"
+
+BTN_CRYPTO_BTC = "₿ بیت‌کوین"
+BTN_CRYPTO_ETH = "Ξ اتریوم"
+BTN_CRYPTO_TRX = "🔴 ترون"
+BTN_CRYPTO_USDT = "🟢 تتر"
 
 BTN_THRESHOLD_BUY = "🟢 آستانه خرید"
 BTN_THRESHOLD_SELL = "🔴 آستانه فروش"
@@ -174,6 +180,82 @@ def chart_caption_usd(suffix: str) -> str:
 
 def chart_caption_ounce(suffix: str) -> str:
     return f"📈 نمودار اونس {suffix}"
+
+
+def chart_caption_crypto(symbol: str, suffix: str) -> str:
+    names = {
+        "BTC": "بیت‌کوین",
+        "ETH": "اتریوم",
+        "TRX": "ترون",
+        "USDT": "تتر",
+    }
+    label = names.get(symbol, symbol)
+    return f"📈 نمودار {label} {suffix}"
+
+
+# ================= CRYPTO =================
+
+CRYPTO_MENU = "🪙 **ارزهای دیجیتال**\nقیمت لحظه‌ای یا نمودار هر ارز را انتخاب کنید:"
+CRYPTO_SELECT_CHART = "📈 **بازه زمانی نمودار را انتخاب کنید:**"
+
+CRYPTO_NAMES = {
+    "BTC": ("₿", "بیت‌کوین"),
+    "ETH": ("Ξ", "اتریوم"),
+    "TRX": ("🔴", "ترون"),
+    "USDT": ("🟢", "تتر"),
+}
+
+
+def _format_toman_short(value: float) -> str:
+    if value >= 1_000_000_000:
+        return f"{value / 1_000_000_000:.2f} میلیارد"
+    if value >= 1_000_000:
+        return f"{value / 1_000_000:.2f} میلیون"
+    return f"{value:,.0f}"
+
+
+def crypto_prices_message(
+    prices: dict,
+    fetched_at: str,
+    stale: bool = False,
+    missing: list[str] | None = None,
+) -> str:
+    lines = ["🪙 **قیمت لحظه‌ای ارزهای دیجیتال**", f"🕒 {fetched_at}"]
+    if stale:
+        lines.append(STALE_DATA_NOTE.strip())
+    lines.append("")
+
+    for symbol in ("BTC", "ETH", "TRX", "USDT"):
+        emoji, name = CRYPTO_NAMES.get(symbol, ("", symbol))
+        entry = prices.get(symbol)
+        if not entry:
+            lines.append(f"{emoji} **{name} ({symbol})**")
+            lines.append("   ❌ نامشخص")
+            lines.append("")
+            continue
+
+        usd = entry.get("usd")
+        toman = entry.get("toman")
+        change = entry.get("change_24h_pct")
+        source = entry.get("source", "")
+
+        usd_part = f"💵 ${usd:,.2f}" if usd is not None else "💵 —"
+        toman_part = f"💰 {_format_toman_short(toman)} تومان" if toman is not None else "💰 —"
+        change_part = ""
+        if change is not None:
+            arrow = "🟢" if change >= 0 else "🔴"
+            change_part = f"  {arrow} {change:+.2f}%"
+
+        source_note = f" _(منبع: {source})_" if source == "ecogold_ir" else ""
+        lines.append(f"{emoji} **{name} ({symbol})**{change_part}")
+        lines.append(f"   {usd_part}  |  {toman_part}{source_note}")
+        lines.append("")
+
+    if missing:
+        lines.append(f"⚠️ داده دریافت نشد: {', '.join(missing)}")
+
+    lines.append("📢 منبع: @arz_247")
+    return "\n".join(lines)
 
 
 # ================= HISTORY =================
@@ -376,12 +458,14 @@ def portfolio_view(
     updated_at: str | None,
     stale_note: str = "",
 ) -> str:
+    gold_value_toman = gold_grams * tala_price
+    usd_value_toman = cash_usd * usd_toman
     updated_line = f"🕒 ثبت/به‌روزرسانی: {updated_at}\n" if updated_at else ""
     return (
         "💼 **دارایی‌های شما**\n\n"
-        f"🥇 طلا: {gold_grams:.2f} گرم\n"
-        f"💵 نقد (تومان): {cash_toman:,} تومان\n"
-        f"💲 نقد (دلار): ${cash_usd:,.2f}\n\n"
+        f"🥇 طلا: {gold_grams:.2f} گرم — **{gold_value_toman:,.0f}** تومان\n"
+        f"💵 نقد (تومان): **{cash_toman:,}** تومان\n"
+        f"💲 نقد (دلار): ${cash_usd:,.2f} — **{usd_value_toman:,.0f}** تومان\n\n"
         "**💰 ارزش فعلی**\n"
         f"🇮🇷 {total_toman:,.0f} تومان\n"
         f"🌐 ${total_usd:,.2f}\n\n"
@@ -437,6 +521,7 @@ def help_message() -> str:
         "**دستورات:**\n"
         "/start — شروع و منوی اصلی\n"
         "/gold — تحلیل بازار طلا\n"
+        "/crypto — قیمت ارزهای دیجیتال\n"
         "/portfolio — ثبت و مشاهده دارایی\n"
         "/history — تاریخچه قیمت\n"
         "/settings — تنظیمات\n"
@@ -446,6 +531,7 @@ def help_message() -> str:
         "**ویژگی‌ها:**\n"
         "🔔 اعلان خرید/فروش/حرکت قیمت\n"
         "📊 تحلیل لحظه‌ای بازار\n"
+        "🪙 قیمت BTC، ETH، TRX و USDT\n"
         "📈 نمودار روند قیمت (از منو)\n"
         "💼 پیگیری دارایی و گزارش روزانه\n"
         "⚙️ تنظیمات شخصی‌سازی\n\n"
@@ -453,13 +539,15 @@ def help_message() -> str:
     )
 
 
-def about_message(usd_channel: str, gold_channel: str) -> str:
+def about_message(usd_channel: str, gold_channel: str, crypto_channel: str = "arz_247") -> str:
     return (
         "ℹ️ **درباره ربات**\n\n"
-        "این ربات قیمت طلای ۱۸ عیار را با ترکیب دلار آزاد و اونس جهانی تحلیل می‌کند.\n\n"
+        "این ربات قیمت طلای ۱۸ عیار را با ترکیب دلار آزاد و اونس جهانی تحلیل می‌کند "
+        "و قیمت ارزهای دیجیتال منتخب را نیز نمایش می‌دهد.\n\n"
         "**منابع قیمت:**\n"
         f"• دلار آزاد: @{usd_channel}\n"
-        f"• طلا و اونس: @{gold_channel}\n\n"
+        f"• طلا، اونس و تتر: @{gold_channel}\n"
+        f"• ارزهای دیجیتال: @{crypto_channel}\n\n"
         "**سازنده:** @b4bak"
     )
 
