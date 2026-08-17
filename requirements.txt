@@ -4,5 +4,7 @@ requests
 matplotlib
 python-dotenv
 beautifulsoup4
+arabic-reshaper
+python-bidi
 python-telegram-bot==21.6
 python-telegram-bot[job-queue]

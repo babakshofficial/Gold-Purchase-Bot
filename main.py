@@ -26,7 +26,38 @@ from telegram.ext import (
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-plt.rcParams['font.family'] = ['DejaVu Sans']
+from plotting import (
+    setup_matplotlib_persian,
+    fa,
+    LBL_TIME,
+    LBL_PRICE_TOMAN,
+    LBL_PRICE_USD,
+    LBL_PRICE_DIFF,
+    LBL_DATE,
+    LBL_USER_COUNT,
+    LBL_MARKET_PRICE,
+    LBL_FAIR_PRICE,
+    LBL_USD_TOMAN,
+    LBL_OUNCE_USD,
+    LBL_BUY_THRESHOLD,
+    LBL_SELL_THRESHOLD,
+    LBL_PRICE_HISTORY,
+    LBL_PRICE_DIFF_HISTORY,
+    LBL_GOLD_COMPARISON,
+    LBL_GOLD_COMPARISON_24H,
+    LBL_USD_CHART,
+    LBL_OUNCE_CHART,
+    LBL_USER_GROWTH,
+    LBL_PRICE_DIFF_TREND,
+    LBL_DAYS_AGO,
+    fa_period_title,
+    persian_legend,
+    set_persian_title,
+    set_persian_xlabel,
+    set_persian_ylabel,
+    finalize_chart,
+)
+setup_matplotlib_persian()
 from io import BytesIO
 import numpy as np 
 from telegram.helpers import escape_markdown 
@@ -661,7 +692,7 @@ def analyze_market(tala, usd_toman, ounce, buy_threshold, wait_threshold):
     return fair_price, var, verdict, emoji, status
 
 def generate_price_chart():
-    """Generate price comparison chart with English labels"""
+    """Generate price comparison chart with Persian labels."""
     end_time = datetime.now()
     start_time = end_time - timedelta(hours=24)
     history = get_price_history_by_timeframe(start_time.isoformat(), end_time.isoformat())
@@ -669,29 +700,22 @@ def generate_price_chart():
         return None
 
     timestamps = [datetime.fromisoformat(h[0]) for h in history]
-    tala_prices = [h[1] for h in history] # Market price
-    fair_prices = [h[2] for h in history] # Fair price
+    tala_prices = [h[1] for h in history]
+    fair_prices = [h[2] for h in history]
 
-    plt.figure(figsize=(10, 6))
-    plt.plot(timestamps, tala_prices, label='Market Price', marker='o', linewidth=2)
-    plt.plot(timestamps, fair_prices, label='Fair Price', marker='s', linewidth=2, linestyle='--')
-
-    plt.xlabel('Time')
-    plt.ylabel('Price (Toman)')
-    plt.title('Gold Price Comparison (Last 24 Hours)')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.xticks(rotation=45)
-    plt.tight_layout()
-
-    buf = BytesIO()
-    plt.savefig(buf, format='png', dpi=100, bbox_inches='tight')
-    buf.seek(0)
-    plt.close()
-    return buf
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.plot(timestamps, tala_prices, label=fa(LBL_MARKET_PRICE), marker='o', linewidth=2)
+    ax.plot(timestamps, fair_prices, label=fa(LBL_FAIR_PRICE), marker='s', linewidth=2, linestyle='--')
+    set_persian_xlabel(ax, LBL_TIME)
+    set_persian_ylabel(ax, LBL_PRICE_TOMAN)
+    set_persian_title(ax, LBL_GOLD_COMPARISON_24H)
+    persian_legend(ax)
+    ax.grid(True, alpha=0.3)
+    plt.setp(ax.get_xticklabels(), rotation=45)
+    return finalize_chart(fig)
 
 def generate_usd_price_chart():
-    """Generate USD price chart (in Toman) - English Labels"""
+    """Generate USD price chart (in Toman) with Persian labels."""
     conn = sqlite3.connect('gold_bot.db')
     c = conn.cursor()
     c.execute('''SELECT timestamp, usd_price
@@ -705,25 +729,18 @@ def generate_usd_price_chart():
     timestamps = [datetime.fromisoformat(h[0]) for h in results]
     usd_prices_toman = [h[1] for h in results]
 
-    plt.figure(figsize=(10, 6))
-    plt.plot(timestamps, usd_prices_toman, label='USD Price (Toman)', marker='o', linewidth=2)
-
-    plt.xlabel('Time')
-    plt.ylabel('Price (Toman)')
-    plt.title('USD Price in Toman')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.xticks(rotation=45)
-    plt.tight_layout()
-
-    buf = BytesIO()
-    plt.savefig(buf, format='png', dpi=100, bbox_inches='tight')
-    buf.seek(0)
-    plt.close()
-    return buf
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.plot(timestamps, usd_prices_toman, label=fa(LBL_USD_TOMAN), marker='o', linewidth=2)
+    set_persian_xlabel(ax, LBL_TIME)
+    set_persian_ylabel(ax, LBL_PRICE_TOMAN)
+    set_persian_title(ax, LBL_USD_CHART)
+    persian_legend(ax)
+    ax.grid(True, alpha=0.3)
+    plt.setp(ax.get_xticklabels(), rotation=45)
+    return finalize_chart(fig)
 
 def generate_ounce_price_chart():
-    """Generate Ounce price chart (in USD) - English Labels"""
+    """Generate Ounce price chart (in USD) with Persian labels."""
     conn = sqlite3.connect('gold_bot.db')
     c = conn.cursor()
     c.execute('''SELECT timestamp, ounce_price
@@ -737,22 +754,15 @@ def generate_ounce_price_chart():
     timestamps = [datetime.fromisoformat(h[0]) for h in results]
     ounce_prices_usd = [h[1] for h in results]
 
-    plt.figure(figsize=(10, 6))
-    plt.plot(timestamps, ounce_prices_usd, label='Ounce Price (USD)', marker='s', linewidth=2)
-
-    plt.xlabel('Time')
-    plt.ylabel('Price (USD)')
-    plt.title('Gold Ounce Price in USD')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.xticks(rotation=45)
-    plt.tight_layout()
-
-    buf = BytesIO()
-    plt.savefig(buf, format='png', dpi=100, bbox_inches='tight')
-    buf.seek(0)
-    plt.close()
-    return buf
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.plot(timestamps, ounce_prices_usd, label=fa(LBL_OUNCE_USD), marker='s', linewidth=2)
+    set_persian_xlabel(ax, LBL_TIME)
+    set_persian_ylabel(ax, LBL_PRICE_USD)
+    set_persian_title(ax, LBL_OUNCE_CHART)
+    persian_legend(ax)
+    ax.grid(True, alpha=0.3)
+    plt.setp(ax.get_xticklabels(), rotation=45)
+    return finalize_chart(fig)
 
 def generate_price_chart_by_timeframe(start_time, end_time):
     """Generate price comparison chart for a specific time range."""
@@ -767,23 +777,16 @@ def generate_price_chart_by_timeframe(start_time, end_time):
     tala_prices = [h[1] for h in history]
     fair_prices = [h[2] for h in history]
 
-    plt.figure(figsize=(10, 6))
-    plt.plot(timestamps, tala_prices, label='Market Price', marker='o', linewidth=2)
-    plt.plot(timestamps, fair_prices, label='Fair Price', marker='s', linewidth=2, linestyle='--')
-
-    plt.xlabel('Time')
-    plt.ylabel('Price (Toman)')
-    plt.title(f'Gold Price Comparison ({start_time} to {end_time})')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.xticks(rotation=45)
-    plt.tight_layout()
-
-    buf = BytesIO()
-    plt.savefig(buf, format='png', dpi=100, bbox_inches='tight')
-    buf.seek(0)
-    plt.close()
-    return buf
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.plot(timestamps, tala_prices, label=fa(LBL_MARKET_PRICE), marker='o', linewidth=2)
+    ax.plot(timestamps, fair_prices, label=fa(LBL_FAIR_PRICE), marker='s', linewidth=2, linestyle='--')
+    set_persian_xlabel(ax, LBL_TIME)
+    set_persian_ylabel(ax, LBL_PRICE_TOMAN)
+    set_persian_title(ax, LBL_GOLD_COMPARISON)
+    persian_legend(ax)
+    ax.grid(True, alpha=0.3)
+    plt.setp(ax.get_xticklabels(), rotation=45)
+    return finalize_chart(fig)
 
 def generate_usd_price_chart_by_timeframe(start_time, end_time):
     """Generate USD price chart for a specific time range."""
@@ -804,22 +807,15 @@ def generate_usd_price_chart_by_timeframe(start_time, end_time):
     timestamps = [datetime.fromisoformat(h[0]) for h in results]
     usd_prices_toman = [h[1] for h in results]
 
-    plt.figure(figsize=(10, 6))
-    plt.plot(timestamps, usd_prices_toman, label='USD Price (Toman)', marker='o', linewidth=2)
-
-    plt.xlabel('Time')
-    plt.ylabel('Price (Toman)')
-    plt.title(f'USD Price in Toman ({start_time} to {end_time})')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.xticks(rotation=45)
-    plt.tight_layout()
-
-    buf = BytesIO()
-    plt.savefig(buf, format='png', dpi=100, bbox_inches='tight')
-    buf.seek(0)
-    plt.close()
-    return buf
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.plot(timestamps, usd_prices_toman, label=fa(LBL_USD_TOMAN), marker='o', linewidth=2)
+    set_persian_xlabel(ax, LBL_TIME)
+    set_persian_ylabel(ax, LBL_PRICE_TOMAN)
+    set_persian_title(ax, LBL_USD_CHART)
+    persian_legend(ax)
+    ax.grid(True, alpha=0.3)
+    plt.setp(ax.get_xticklabels(), rotation=45)
+    return finalize_chart(fig)
 
 def generate_ounce_price_chart_by_timeframe(start_time, end_time):
     """Generate Ounce price chart for a specific time range."""
@@ -840,22 +836,15 @@ def generate_ounce_price_chart_by_timeframe(start_time, end_time):
     timestamps = [datetime.fromisoformat(h[0]) for h in results]
     ounce_prices_usd = [h[1] for h in results]
 
-    plt.figure(figsize=(10, 6))
-    plt.plot(timestamps, ounce_prices_usd, label='Ounce Price (USD)', marker='s', linewidth=2)
-
-    plt.xlabel('Time')
-    plt.ylabel('Price (USD)')
-    plt.title(f'Gold Ounce Price in USD ({start_time} to {end_time})')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.xticks(rotation=45)
-    plt.tight_layout()
-
-    buf = BytesIO()
-    plt.savefig(buf, format='png', dpi=100, bbox_inches='tight')
-    buf.seek(0)
-    plt.close()
-    return buf
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.plot(timestamps, ounce_prices_usd, label=fa(LBL_OUNCE_USD), marker='s', linewidth=2)
+    set_persian_xlabel(ax, LBL_TIME)
+    set_persian_ylabel(ax, LBL_PRICE_USD)
+    set_persian_title(ax, LBL_OUNCE_CHART)
+    persian_legend(ax)
+    ax.grid(True, alpha=0.3)
+    plt.setp(ax.get_xticklabels(), rotation=45)
+    return finalize_chart(fig)
 
 def requests_session_with_retries():
     """Creates a requests session with retry strategy."""
@@ -972,7 +961,7 @@ async def send_daily_summary(context: ContextTypes.DEFAULT_TYPE):
         logger.exception("Daily summary process failed.")
 
 def generate_user_growth_chart(days=30):
-    """Generate user growth chart with English labels"""
+    """Generate user growth chart with Persian labels."""
     conn = sqlite3.connect('gold_bot.db')
     c = conn.cursor()
     c.execute('''SELECT DATE(created_at) as date, COUNT(*) as count
@@ -995,25 +984,18 @@ def generate_user_growth_chart(days=30):
         total += count
         cumulative.append(total)
 
-    plt.figure(figsize=(10, 6))
-    plt.plot(dates, cumulative, marker='o', linewidth=2, color='#2196F3')
-    plt.fill_between(dates, cumulative, alpha=0.3, color='#2196F3')
-
-    plt.xlabel('Date')
-    plt.ylabel('Number of Users')
-    plt.title(f'User Growth ({days} Days Ago)')
-    plt.grid(True, alpha=0.3)
-    plt.xticks(rotation=45)
-    plt.tight_layout()
-
-    buf = BytesIO()
-    plt.savefig(buf, format='png', dpi=100, bbox_inches='tight')
-    buf.seek(0)
-    plt.close()
-    return buf
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.plot(dates, cumulative, marker='o', linewidth=2, color='#2196F3')
+    ax.fill_between(dates, cumulative, alpha=0.3, color='#2196F3')
+    set_persian_xlabel(ax, LBL_DATE)
+    set_persian_ylabel(ax, LBL_USER_COUNT)
+    set_persian_title(ax, fa_period_title(LBL_USER_GROWTH, days, LBL_DAYS_AGO))
+    ax.grid(True, alpha=0.3)
+    plt.setp(ax.get_xticklabels(), rotation=45)
+    return finalize_chart(fig)
 
 def generate_price_difference_chart(days=7):
-    """Generate price difference trend chart with English labels, fetching data from DB"""
+    """Generate price difference trend chart with Persian labels."""
     end_time = datetime.now()
     start_time = end_time - timedelta(days=days)
     history = get_price_history_by_timeframe(start_time.isoformat(), end_time.isoformat())
@@ -1032,29 +1014,21 @@ def generate_price_difference_chart(days=7):
         else:
             colors.append('#F44336')
 
-    plt.figure(figsize=(12, 6))
-    plt.scatter(timestamps, differences, c=colors, s=50, alpha=0.6)
-    plt.plot(timestamps, differences, linewidth=1, alpha=0.5, color='gray')
-
-    plt.axhline(y=DEFAULT_BUY_THRESHOLD, color='green', linestyle='--', label='Buy Threshold', alpha=0.7)
-    plt.axhline(y=DEFAULT_WAIT_THRESHOLD, color='red', linestyle='--', label='Sell Threshold', alpha=0.7)
-
-    plt.xlabel('Time')
-    plt.ylabel('Price Difference (Toman)')
-    plt.title(f'Price Difference Trend ({days} Days Ago)')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.xticks(rotation=45)
-    plt.tight_layout()
-
-    buf = BytesIO()
-    plt.savefig(buf, format='png', dpi=100, bbox_inches='tight')
-    buf.seek(0)
-    plt.close()
-    return buf
+    fig, ax = plt.subplots(figsize=(12, 6))
+    ax.scatter(timestamps, differences, c=colors, s=50, alpha=0.6)
+    ax.plot(timestamps, differences, linewidth=1, alpha=0.5, color='gray')
+    ax.axhline(y=DEFAULT_BUY_THRESHOLD, color='green', linestyle='--', label=fa(LBL_BUY_THRESHOLD), alpha=0.7)
+    ax.axhline(y=DEFAULT_WAIT_THRESHOLD, color='red', linestyle='--', label=fa(LBL_SELL_THRESHOLD), alpha=0.7)
+    set_persian_xlabel(ax, LBL_TIME)
+    set_persian_ylabel(ax, LBL_PRICE_DIFF)
+    set_persian_title(ax, fa_period_title(LBL_PRICE_DIFF_TREND, days, LBL_DAYS_AGO))
+    persian_legend(ax)
+    ax.grid(True, alpha=0.3)
+    plt.setp(ax.get_xticklabels(), rotation=45)
+    return finalize_chart(fig)
 
 def generate_detailed_history_chart(start_time, end_time):
-    """Generate a chart for a specific time period with English labels, fetching data from DB"""
+    """Generate a chart for a specific time period with Persian labels."""
     if isinstance(start_time, str):
         start_time_dt = datetime.fromisoformat(start_time)
     else:
@@ -1075,11 +1049,11 @@ def generate_detailed_history_chart(start_time, end_time):
 
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
 
-    ax1.plot(timestamps, tala_prices, label='Market Price', marker='o', linewidth=2)
-    ax1.plot(timestamps, fair_prices, label='Fair Price', marker='s', linewidth=2, linestyle='--')
-    ax1.set_ylabel('Price (Toman)')
-    ax1.set_title('Price History')
-    ax1.legend()
+    ax1.plot(timestamps, tala_prices, label=fa(LBL_MARKET_PRICE), marker='o', linewidth=2)
+    ax1.plot(timestamps, fair_prices, label=fa(LBL_FAIR_PRICE), marker='s', linewidth=2, linestyle='--')
+    set_persian_ylabel(ax1, LBL_PRICE_TOMAN)
+    set_persian_title(ax1, LBL_PRICE_HISTORY)
+    persian_legend(ax1)
     ax1.grid(True, alpha=0.3)
 
     colors = []
@@ -1093,22 +1067,16 @@ def generate_detailed_history_chart(start_time, end_time):
 
     ax2.scatter(timestamps, differences, c=colors, s=50, alpha=0.6)
     ax2.plot(timestamps, differences, linewidth=1, alpha=0.5, color='gray')
-    ax2.axhline(y=DEFAULT_BUY_THRESHOLD, color='green', linestyle='--', label='Buy Threshold', alpha=0.7)
-    ax2.axhline(y=DEFAULT_WAIT_THRESHOLD, color='red', linestyle='--', label='Sell Threshold', alpha=0.7)
-    ax2.set_ylabel('Price Difference (Toman)')
-    ax2.set_xlabel('Time')
-    ax2.set_title('Price Difference History')
-    ax2.legend()
+    ax2.axhline(y=DEFAULT_BUY_THRESHOLD, color='green', linestyle='--', label=fa(LBL_BUY_THRESHOLD), alpha=0.7)
+    ax2.axhline(y=DEFAULT_WAIT_THRESHOLD, color='red', linestyle='--', label=fa(LBL_SELL_THRESHOLD), alpha=0.7)
+    set_persian_ylabel(ax2, LBL_PRICE_DIFF)
+    set_persian_xlabel(ax2, LBL_TIME)
+    set_persian_title(ax2, LBL_PRICE_DIFF_HISTORY)
+    persian_legend(ax2)
     ax2.grid(True, alpha=0.3)
 
-    plt.xticks(rotation=45)
-    plt.tight_layout()
-
-    buf = BytesIO()
-    plt.savefig(buf, format='png', dpi=100, bbox_inches='tight')
-    buf.seek(0)
-    plt.close()
-    return buf
+    plt.setp(ax2.get_xticklabels(), rotation=45)
+    return finalize_chart(fig)
 
 # ================= AUDIT LOGGING =================
 async def audit_log(context: ContextTypes.DEFAULT_TYPE, user_id, username, command, response_summary):
@@ -1539,102 +1507,6 @@ async def gold_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE, quer
     except Exception:
         logger.exception("Gold analysis failed")
         await processing_msg.edit_text(msg.ERROR_FETCH, reply_markup=kb_back(NAV_MAIN))
-
-def generate_price_chart_by_timeframe(start_time, end_time):
-    """Generate price comparison chart for a specific time range."""
-    history = get_price_history_by_timeframe(start_time, end_time)
-    if len(history) < 2:
-        return None
-
-    timestamps = [datetime.fromisoformat(h[0]) for h in history]
-    tala_prices = [h[1] for h in history]
-    fair_prices = [h[2] for h in history]
-
-    plt.figure(figsize=(10, 6))
-    plt.plot(timestamps, tala_prices, label='Market Price', marker='o', linewidth=2)
-    plt.plot(timestamps, fair_prices, label='Fair Price', marker='s', linewidth=2, linestyle='--')
-
-    plt.xlabel('Time')
-    plt.ylabel('Price (Toman)')
-    plt.title(f'Gold Price Comparison ({start_time} to {end_time})')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.xticks(rotation=45)
-    plt.tight_layout()
-
-    buf = BytesIO()
-    plt.savefig(buf, format='png', dpi=100, bbox_inches='tight')
-    buf.seek(0)
-    plt.close()
-    return buf
-
-def generate_usd_price_chart_by_timeframe(start_time, end_time):
-    """Generate USD price chart for a specific time range."""
-    conn = sqlite3.connect('gold_bot.db')
-    c = conn.cursor()
-    c.execute('''SELECT timestamp, usd_price
-                 FROM price_history
-                 WHERE timestamp BETWEEN ? AND ?
-                 ORDER BY timestamp ASC''', (start_time, end_time))
-    results = c.fetchall()
-    conn.close()
-
-    if len(results) < 2:
-        return None
-
-    timestamps = [datetime.fromisoformat(h[0]) for h in results]
-    usd_prices_toman = [h[1] for h in results]
-
-    plt.figure(figsize=(10, 6))
-    plt.plot(timestamps, usd_prices_toman, label='USD Price (Toman)', marker='o', linewidth=2)
-
-    plt.xlabel('Time')
-    plt.ylabel('Price (Toman)')
-    plt.title(f'USD Price in Toman ({start_time} to {end_time})')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.xticks(rotation=45)
-    plt.tight_layout()
-
-    buf = BytesIO()
-    plt.savefig(buf, format='png', dpi=100, bbox_inches='tight')
-    buf.seek(0)
-    plt.close()
-    return buf
-
-def generate_ounce_price_chart_by_timeframe(start_time, end_time):
-    """Generate Ounce price chart for a specific time range."""
-    conn = sqlite3.connect('gold_bot.db')
-    c = conn.cursor()
-    c.execute('''SELECT timestamp, ounce_price
-                 FROM price_history
-                 WHERE timestamp BETWEEN ? AND ?
-                 ORDER BY timestamp ASC''', (start_time, end_time))
-    results = c.fetchall()
-    conn.close()
-
-    if len(results) < 2:
-        return None
-
-    timestamps = [datetime.fromisoformat(h[0]) for h in results]
-    ounce_prices_usd = [h[1] for h in results]
-
-    plt.figure(figsize=(10, 6))
-    plt.plot(timestamps, ounce_prices_usd, label='Ounce Price (USD)', marker='s', linewidth=2)
-
-    plt.xlabel('Time')
-    plt.ylabel('Price (USD)')
-    plt.title(f'Gold Ounce Price in USD ({start_time} to {end_time})')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.xticks(rotation=45)
-    plt.tight_layout()
-
-    buf = BytesIO()
-    plt.savefig(buf, format='png', dpi=100, bbox_inches='tight')
-    buf.seek(0)
-    plt.close()
-    return buf
 
 
 async def show_history_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, query=None):
