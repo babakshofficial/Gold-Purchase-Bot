@@ -7,9 +7,10 @@ from datetime import datetime
 
 BTN_ANALYSIS = "📊 تحلیل بازار"
 BTN_CALC = "💰 محاسبه گرم"
-BTN_CHART_GOLD = "📈 نمودار قیمت"
+BTN_CHART_GOLD = "📈 نمودار قیمت طلا"
 BTN_CHART_USD = "📈 نمودار دلار"
 BTN_CHART_OUNCE = "📈 نمودار اونس"
+BTN_CHARTS = "📈 نمودارها"
 BTN_HISTORY = "🔍 تاریخچه قیمت"
 BTN_SETTINGS = "⚙️ تنظیمات"
 BTN_PORTFOLIO = "💼 دارایی من"
@@ -21,6 +22,7 @@ BTN_BACK_MAIN = "🔙 بازگشت به منو اصلی"
 BTN_BACK_PREV = "🔙 بازگشت به منو پیشین"
 BTN_CANCEL = "❌ لغو"
 BTN_UPDATE_PORTFOLIO = "✏️ به‌روزرسانی دارایی"
+BTN_PORTFOLIO_CONTINUE = "⏭ بدون تغییر — ادامه"
 BTN_BACK_TO_PORTFOLIO = "🔙 بازگشت"
 BTN_SET_THRESHOLDS = "🎚 تنظیم آستانه‌ها"
 
@@ -163,6 +165,7 @@ def calc_result(
 
 # ================= CHARTS =================
 
+CHARTS_MENU = "📈 **نمودار مورد نظر را انتخاب کنید:**"
 CHART_SELECT_GOLD = "📈 **بازه زمانی نمودار طلا را انتخاب کنید:**"
 CHART_SELECT_USD = "📈 **بازه زمانی نمودار دلار را انتخاب کنید:**"
 CHART_SELECT_OUNCE = "📈 **بازه زمانی نمودار اونس را انتخاب کنید:**"
@@ -239,15 +242,15 @@ def crypto_prices_message(
         change = entry.get("change_24h_pct")
         source = entry.get("source", "")
 
-        usd_part = f"💵 ${usd:,.2f}" if usd is not None else "💵 —"
-        toman_part = f"💰 {_format_toman_short(toman)} تومان" if toman is not None else "💰 —"
+        usd_part = f"💵 \u200e${usd:,.2f}\u200e" if usd is not None else "💵 —"
+        toman_part = f"💰 \u200f{_format_toman_short(toman)} تومان\u200f" if toman is not None else "💰 —"
         change_part = ""
         if change is not None:
             arrow = "🟢" if change >= 0 else "🔴"
-            change_part = f"  {arrow} {change:+.2f}%"
+            change_part = f"  {arrow} \u200e{change:+.2f}%\u200e"
 
-        source_note = f" _(منبع: {source})_" if source == "ecogold_ir" else ""
-        lines.append(f"{emoji} **{name} ({symbol})**{change_part}")
+        source_note = ""
+        lines.append(f"\u200f{emoji} **{name} ({symbol})**{change_part}")
         lines.append(f"   {usd_part}  |  {toman_part}{source_note}")
         lines.append("")
 
@@ -398,26 +401,97 @@ def daily_market_summary(
 
 # ================= PORTFOLIO =================
 
-PORTFOLIO_PROMPT_GOLD = (
-    "💼 **ثبت دارایی — مرحله ۱ از ۳**\n\n"
-    "مقدار **طلا** خود را به **گرم** وارد کنید.\n"
-    "اگر طلا ندارید، `0` بزنید.\n\n"
-    "مثال: `25.5`"
-)
+def _portfolio_current_line(show_current: bool, formatted: str) -> str:
+    if not show_current:
+        return ""
+    return f"📌 **موجودی فعلی:** {formatted}\n\n"
 
-PORTFOLIO_PROMPT_TOMAN = (
-    "💼 **ثبت دارایی — مرحله ۲ از ۳**\n\n"
-    "مقدار **نقد تومان** خود را وارد کنید.\n"
-    "اگر ندارید، `0` بزنید.\n\n"
-    "مثال: `10000000`"
-)
 
-PORTFOLIO_PROMPT_USD = (
-    "💼 **ثبت دارایی — مرحله ۳ از ۳**\n\n"
-    "مقدار **دلار نقد** خود را وارد کنید.\n"
-    "اگر ندارید، `0` بزنید.\n\n"
-    "مثال: `500`"
-)
+def _format_crypto_amount(amount: float) -> str:
+    if amount >= 1:
+        text = f"{amount:,.4f}"
+    elif amount >= 0.0001:
+        text = f"{amount:.6f}"
+    else:
+        text = f"{amount:.8f}"
+    return text.rstrip("0").rstrip(".")
+
+
+def portfolio_prompt_gold(current: float = 0, show_current: bool = False) -> str:
+    current_line = _portfolio_current_line(show_current, f"{current:.2f} گرم")
+    return (
+        "💼 **ثبت دارایی — مرحله ۱ از ۷**\n\n"
+        f"{current_line}"
+        "مقدار **طلا** خود را به **گرم** وارد کنید.\n"
+        "اگر طلا ندارید، `0` بزنید.\n\n"
+        "مثال: `25.5`"
+    )
+
+
+def portfolio_prompt_toman(current: int = 0, show_current: bool = False) -> str:
+    current_line = _portfolio_current_line(show_current, f"{current:,} تومان")
+    return (
+        "💼 **ثبت دارایی — مرحله ۲ از ۷**\n\n"
+        f"{current_line}"
+        "مقدار **نقد تومان** خود را وارد کنید.\n"
+        "اگر ندارید، `0` بزنید.\n\n"
+        "مثال: `10000000`"
+    )
+
+
+def portfolio_prompt_usd(current: float = 0, show_current: bool = False) -> str:
+    current_line = _portfolio_current_line(show_current, f"${current:,.2f}")
+    return (
+        "💼 **ثبت دارایی — مرحله ۳ از ۷**\n\n"
+        f"{current_line}"
+        "مقدار **دلار نقد** خود را وارد کنید.\n"
+        "اگر ندارید، `0` بزنید.\n\n"
+        "مثال: `500`"
+    )
+
+
+def portfolio_prompt_btc(current: float = 0, show_current: bool = False) -> str:
+    current_line = _portfolio_current_line(show_current, f"{_format_crypto_amount(current)} BTC")
+    return (
+        "💼 **ثبت دارایی — مرحله ۴ از ۷**\n\n"
+        f"{current_line}"
+        "مقدار **بیت‌کوین (BTC)** خود را وارد کنید.\n"
+        "اگر ندارید، `0` بزنید.\n\n"
+        "مثال: `0.05`"
+    )
+
+
+def portfolio_prompt_eth(current: float = 0, show_current: bool = False) -> str:
+    current_line = _portfolio_current_line(show_current, f"{_format_crypto_amount(current)} ETH")
+    return (
+        "💼 **ثبت دارایی — مرحله ۵ از ۷**\n\n"
+        f"{current_line}"
+        "مقدار **اتریوم (ETH)** خود را وارد کنید.\n"
+        "اگر ندارید، `0` بزنید.\n\n"
+        "مثال: `1.2`"
+    )
+
+
+def portfolio_prompt_trx(current: float = 0, show_current: bool = False) -> str:
+    current_line = _portfolio_current_line(show_current, f"{_format_crypto_amount(current)} TRX")
+    return (
+        "💼 **ثبت دارایی — مرحله ۶ از ۷**\n\n"
+        f"{current_line}"
+        "مقدار **ترون (TRX)** خود را وارد کنید.\n"
+        "اگر ندارید، `0` بزنید.\n\n"
+        "مثال: `5000`"
+    )
+
+
+def portfolio_prompt_usdt(current: float = 0, show_current: bool = False) -> str:
+    current_line = _portfolio_current_line(show_current, f"{_format_crypto_amount(current)} USDT")
+    return (
+        "💼 **ثبت دارایی — مرحله ۷ از ۷**\n\n"
+        f"{current_line}"
+        "مقدار **تتر (USDT)** خود را وارد کنید.\n"
+        "اگر ندارید، `0` بزنید.\n\n"
+        "مثال: `1000`"
+    )
 
 PORTFOLIO_EMPTY_ERROR = (
     "❌ حداقل یکی از دارایی‌ها باید بیشتر از صفر باشد.\n"
@@ -444,10 +518,28 @@ def _format_pnl(value: float, pct: float, currency: str = "تومان") -> str:
     return f"{_pnl_emoji(value)} {sign}{value:,.0f} {currency} ({sign}{pct:.1f}%)"
 
 
+def _portfolio_crypto_lines(crypto_prices: dict, **amounts: float) -> str:
+    lines = []
+    for symbol in ("BTC", "ETH", "TRX", "USDT"):
+        amount = amounts.get(f"crypto_{symbol.lower()}") or 0
+        emoji, name = CRYPTO_NAMES.get(symbol, ("🪙", symbol))
+        price_toman = (crypto_prices.get(symbol) or {}).get("toman") or 0
+        value_toman = amount * price_toman
+        lines.append(
+            f"{emoji} {name}: {_format_crypto_amount(amount)} — **{value_toman:,.0f}** تومان"
+        )
+    return "\n".join(lines)
+
+
 def portfolio_view(
     gold_grams: float,
     cash_toman: int,
     cash_usd: float,
+    crypto_btc: float,
+    crypto_eth: float,
+    crypto_trx: float,
+    crypto_usdt: float,
+    crypto_prices: dict,
     total_toman: float,
     total_usd: float,
     pnl_toman: float,
@@ -460,12 +552,20 @@ def portfolio_view(
 ) -> str:
     gold_value_toman = gold_grams * tala_price
     usd_value_toman = cash_usd * usd_toman
+    crypto_lines = _portfolio_crypto_lines(
+        crypto_prices,
+        crypto_btc=crypto_btc,
+        crypto_eth=crypto_eth,
+        crypto_trx=crypto_trx,
+        crypto_usdt=crypto_usdt,
+    )
     updated_line = f"🕒 ثبت/به‌روزرسانی: {updated_at}\n" if updated_at else ""
     return (
         "💼 **دارایی‌های شما**\n\n"
         f"🥇 طلا: {gold_grams:.2f} گرم — **{gold_value_toman:,.0f}** تومان\n"
         f"💵 نقد (تومان): **{cash_toman:,}** تومان\n"
-        f"💲 نقد (دلار): ${cash_usd:,.2f} — **{usd_value_toman:,.0f}** تومان\n\n"
+        f"💲 نقد (دلار): ${cash_usd:,.2f} — **{usd_value_toman:,.0f}** تومان\n"
+        f"{crypto_lines}\n\n"
         "**💰 ارزش فعلی**\n"
         f"🇮🇷 {total_toman:,.0f} تومان\n"
         f"🌐 ${total_usd:,.2f}\n\n"
@@ -485,6 +585,11 @@ def portfolio_daily_report(
     gold_grams: float,
     cash_toman: int,
     cash_usd: float,
+    crypto_btc: float,
+    crypto_eth: float,
+    crypto_trx: float,
+    crypto_usdt: float,
+    crypto_prices: dict,
     total_toman: float,
     total_usd: float,
     pnl_toman: float,
@@ -494,12 +599,20 @@ def portfolio_daily_report(
 ) -> str:
     gold_value_toman = gold_grams * tala_price
     usd_value_toman = cash_usd * usd_toman
+    crypto_lines = _portfolio_crypto_lines(
+        crypto_prices,
+        crypto_btc=crypto_btc,
+        crypto_eth=crypto_eth,
+        crypto_trx=crypto_trx,
+        crypto_usdt=crypto_usdt,
+    )
     return (
         f"📊 **گزارش روزانه دارایی**\n"
         f"📅 {date_str}\n\n"
         f"🥇 طلا: {gold_grams:.2f} گرم — **{gold_value_toman:,.0f}** تومان\n"
         f"💵 نقد (تومان): **{cash_toman:,}** تومان\n"
-        f"💲 نقد (دلار): ${cash_usd:,.2f} — **{usd_value_toman:,.0f}** تومان\n\n"
+        f"💲 نقد (دلار): ${cash_usd:,.2f} — **{usd_value_toman:,.0f}** تومان\n"
+        f"{crypto_lines}\n\n"
         "**💰 ارزش امروز**\n"
         f"🇮🇷 {total_toman:,.0f} تومان\n"
         f"🌐 ${total_usd:,.2f}\n\n"
@@ -512,8 +625,8 @@ def portfolio_daily_report(
 
 PORTFOLIO_NOT_SET = (
     "💼 **هنوز دارایی ثبت نکرده‌اید**\n\n"
-    "با `/portfolio` می‌توانید طلا، نقد تومان و دلار خود را ثبت کنید "
-    "و هر روز ارزش و سود/زیان را دریافت کنید."
+    "با `/portfolio` می‌توانید طلا، نقد تومان، دلار و ارزهای دیجیتال "
+    "(BTC، ETH، TRX، USDT) خود را ثبت کنید و هر روز ارزش و سود/زیان را دریافت کنید."
 )
 
 
@@ -537,7 +650,7 @@ def help_message() -> str:
         "📊 تحلیل لحظه‌ای بازار\n"
         "🪙 قیمت BTC، ETH، TRX و USDT\n"
         "📈 نمودار روند قیمت (از منو)\n"
-        "💼 پیگیری دارایی و گزارش روزانه\n"
+        "💼 پیگیری دارایی (طلا، نقد، BTC/ETH/TRX/USDT) و گزارش روزانه\n"
         "⚙️ تنظیمات شخصی‌سازی\n\n"
         "👤 سازنده: @b4bak"
     )

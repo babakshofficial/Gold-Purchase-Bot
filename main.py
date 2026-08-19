@@ -58,6 +58,7 @@ from plotting import (
     set_persian_xlabel,
     set_persian_ylabel,
     finalize_chart,
+    apply_rtl_xaxis,
 )
 setup_matplotlib_persian()
 from io import BytesIO
@@ -108,6 +109,78 @@ ASK_CHART_TIMEFRAME = 7
 ASK_PORTFOLIO_GOLD = 8
 ASK_PORTFOLIO_TOMAN = 9
 ASK_PORTFOLIO_USD = 10
+ASK_PORTFOLIO_BTC = 11
+ASK_PORTFOLIO_ETH = 12
+ASK_PORTFOLIO_TRX = 13
+ASK_PORTFOLIO_USDT = 14
+
+PORTFOLIO_CRYPTO_KEYS = {
+    "BTC": "portfolio_btc",
+    "ETH": "portfolio_eth",
+    "TRX": "portfolio_trx",
+    "USDT": "portfolio_usdt",
+}
+
+PORTFOLIO_SETUP_STEPS = (
+    {
+        "step_id": "gold",
+        "data_key": "portfolio_gold",
+        "portfolio_key": "gold_grams",
+        "state": ASK_PORTFOLIO_GOLD,
+        "prompt": msg.portfolio_prompt_gold,
+        "parser": float,
+    },
+    {
+        "step_id": "toman",
+        "data_key": "portfolio_toman",
+        "portfolio_key": "cash_toman",
+        "state": ASK_PORTFOLIO_TOMAN,
+        "prompt": msg.portfolio_prompt_toman,
+        "parser": int,
+    },
+    {
+        "step_id": "usd",
+        "data_key": "portfolio_usd",
+        "portfolio_key": "cash_usd",
+        "state": ASK_PORTFOLIO_USD,
+        "prompt": msg.portfolio_prompt_usd,
+        "parser": float,
+    },
+    {
+        "step_id": "btc",
+        "data_key": "portfolio_btc",
+        "portfolio_key": "crypto_btc",
+        "state": ASK_PORTFOLIO_BTC,
+        "prompt": msg.portfolio_prompt_btc,
+        "parser": float,
+    },
+    {
+        "step_id": "eth",
+        "data_key": "portfolio_eth",
+        "portfolio_key": "crypto_eth",
+        "state": ASK_PORTFOLIO_ETH,
+        "prompt": msg.portfolio_prompt_eth,
+        "parser": float,
+    },
+    {
+        "step_id": "trx",
+        "data_key": "portfolio_trx",
+        "portfolio_key": "crypto_trx",
+        "state": ASK_PORTFOLIO_TRX,
+        "prompt": msg.portfolio_prompt_trx,
+        "parser": float,
+    },
+    {
+        "step_id": "usdt",
+        "data_key": "portfolio_usdt",
+        "portfolio_key": "crypto_usdt",
+        "state": ASK_PORTFOLIO_USDT,
+        "prompt": msg.portfolio_prompt_usdt,
+        "parser": float,
+    },
+)
+
+PORTFOLIO_STEP_BY_ID = {step["step_id"]: step for step in PORTFOLIO_SETUP_STEPS}
 STORE_PREV_MENU = 'previous_menu'
 TEHRAN_TZ = pytz.timezone('Asia/Tehran')
 
@@ -116,6 +189,7 @@ NAV_MAIN = "main_menu"
 NAV_SETTINGS = "settings"
 NAV_HISTORY = "history_menu"
 NAV_PORTFOLIO = "portfolio"
+NAV_CHARTS = "charts_menu"
 NAV_CRYPTO = "crypto_menu"
 NAV_THRESHOLDS = "set_thresholds"
 NAV_ADMIN = "admin_menu"
@@ -168,6 +242,10 @@ def _migrate_users_columns(c):
         'ALTER TABLE users ADD COLUMN gold_grams REAL DEFAULT NULL',
         'ALTER TABLE users ADD COLUMN cash_toman INTEGER DEFAULT 0',
         'ALTER TABLE users ADD COLUMN cash_usd REAL DEFAULT 0',
+        'ALTER TABLE users ADD COLUMN crypto_btc REAL DEFAULT 0',
+        'ALTER TABLE users ADD COLUMN crypto_eth REAL DEFAULT 0',
+        'ALTER TABLE users ADD COLUMN crypto_trx REAL DEFAULT 0',
+        'ALTER TABLE users ADD COLUMN crypto_usdt REAL DEFAULT 0',
         'ALTER TABLE users ADD COLUMN baseline_gold_price INTEGER DEFAULT NULL',
         'ALTER TABLE users ADD COLUMN baseline_usd_toman REAL DEFAULT NULL',
         'ALTER TABLE users ADD COLUMN baseline_total_toman INTEGER DEFAULT NULL',
@@ -250,22 +328,27 @@ def get_user_portfolio(user_id):
     conn = sqlite3.connect('gold_bot.db')
     c = conn.cursor()
     c.execute('''SELECT gold_grams, cash_toman, cash_usd,
+                        crypto_btc, crypto_eth, crypto_trx, crypto_usdt,
                         baseline_gold_price, baseline_usd_toman,
                         baseline_total_toman, baseline_total_usd, portfolio_updated_at
                  FROM users WHERE user_id = ?''', (user_id,))
     result = c.fetchone()
     conn.close()
-    if not result or result[7] is None:
+    if not result or result[11] is None:
         return None
     return {
         'gold_grams': result[0] or 0.0,
         'cash_toman': result[1] or 0,
         'cash_usd': result[2] or 0.0,
-        'baseline_gold_price': result[3],
-        'baseline_usd_toman': result[4],
-        'baseline_total_toman': result[5],
-        'baseline_total_usd': result[6],
-        'portfolio_updated_at': result[7],
+        'crypto_btc': result[3] or 0.0,
+        'crypto_eth': result[4] or 0.0,
+        'crypto_trx': result[5] or 0.0,
+        'crypto_usdt': result[6] or 0.0,
+        'baseline_gold_price': result[7],
+        'baseline_usd_toman': result[8],
+        'baseline_total_toman': result[9],
+        'baseline_total_usd': result[10],
+        'portfolio_updated_at': result[11],
     }
 
 def user_has_portfolio(user_id):
@@ -276,22 +359,47 @@ def user_has_portfolio(user_id):
         (portfolio['gold_grams'] or 0) > 0
         or (portfolio['cash_toman'] or 0) > 0
         or (portfolio['cash_usd'] or 0) > 0
+        or (portfolio['crypto_btc'] or 0) > 0
+        or (portfolio['crypto_eth'] or 0) > 0
+        or (portfolio['crypto_trx'] or 0) > 0
+        or (portfolio['crypto_usdt'] or 0) > 0
     )
 
-def save_user_portfolio(user_id, gold_grams, cash_toman, cash_usd, tala_price, usd_toman):
-    gold_value = gold_grams * tala_price
-    total_toman = gold_value + cash_toman + (cash_usd * usd_toman)
-    total_usd = total_toman / usd_toman if usd_toman else 0
+def save_user_portfolio(
+    user_id,
+    gold_grams,
+    cash_toman,
+    cash_usd,
+    crypto_btc,
+    crypto_eth,
+    crypto_trx,
+    crypto_usdt,
+    tala_price,
+    usd_toman,
+    crypto_prices,
+):
+    portfolio = {
+        'gold_grams': gold_grams,
+        'cash_toman': cash_toman,
+        'cash_usd': cash_usd,
+        'crypto_btc': crypto_btc,
+        'crypto_eth': crypto_eth,
+        'crypto_trx': crypto_trx,
+        'crypto_usdt': crypto_usdt,
+    }
+    total_toman, total_usd = _portfolio_totals(portfolio, tala_price, usd_toman, crypto_prices)
     conn = sqlite3.connect('gold_bot.db')
     c = conn.cursor()
     c.execute('''UPDATE users SET
                  gold_grams = ?, cash_toman = ?, cash_usd = ?,
+                 crypto_btc = ?, crypto_eth = ?, crypto_trx = ?, crypto_usdt = ?,
                  baseline_gold_price = ?, baseline_usd_toman = ?,
                  baseline_total_toman = ?, baseline_total_usd = ?,
                  portfolio_updated_at = CURRENT_TIMESTAMP
                  WHERE user_id = ?''',
-              (gold_grams, cash_toman, cash_usd, tala_price, usd_toman,
-               int(total_toman), total_usd, user_id))
+              (gold_grams, cash_toman, cash_usd,
+               crypto_btc, crypto_eth, crypto_trx, crypto_usdt,
+               tala_price, usd_toman, int(total_toman), total_usd, user_id))
     conn.commit()
     conn.close()
     return int(total_toman), total_usd
@@ -300,11 +408,13 @@ def get_users_with_portfolio_notifications():
     conn = sqlite3.connect('gold_bot.db')
     c = conn.cursor()
     c.execute('''SELECT user_id, gold_grams, cash_toman, cash_usd,
+                        crypto_btc, crypto_eth, crypto_trx, crypto_usdt,
                         baseline_total_toman, baseline_total_usd, notification_flags
                  FROM users
                  WHERE notifications = 1
                  AND portfolio_updated_at IS NOT NULL
-                 AND (gold_grams > 0 OR cash_toman > 0 OR cash_usd > 0)''')
+                 AND (gold_grams > 0 OR cash_toman > 0 OR cash_usd > 0
+                      OR crypto_btc > 0 OR crypto_eth > 0 OR crypto_trx > 0 OR crypto_usdt > 0)''')
     results = c.fetchall()
     conn.close()
     return results
@@ -325,13 +435,27 @@ def fetch_current_prices():
             return latest[0], latest[1], latest[2], True
         raise RuntimeError("No price data available")
 
-def calculate_portfolio_values(portfolio, tala_price, usd_toman):
-    gold_grams = portfolio['gold_grams'] or 0
-    cash_toman = portfolio['cash_toman'] or 0
-    cash_usd = portfolio['cash_usd'] or 0
-    gold_value = gold_grams * tala_price
-    total_toman = gold_value + cash_toman + (cash_usd * usd_toman)
+def _crypto_holdings_value(portfolio, crypto_prices):
+    total = 0.0
+    for symbol in STAGE1_SYMBOLS:
+        amount = portfolio.get(f"crypto_{symbol.lower()}") or 0
+        price_toman = (crypto_prices.get(symbol) or {}).get("toman") or 0
+        total += amount * price_toman
+    return total
+
+
+def _portfolio_totals(portfolio, tala_price, usd_toman, crypto_prices):
+    gold_value = (portfolio.get('gold_grams') or 0) * tala_price
+    cash_toman = portfolio.get('cash_toman') or 0
+    cash_usd = portfolio.get('cash_usd') or 0
+    crypto_value = _crypto_holdings_value(portfolio, crypto_prices or {})
+    total_toman = gold_value + cash_toman + (cash_usd * usd_toman) + crypto_value
     total_usd = total_toman / usd_toman if usd_toman else 0
+    return total_toman, total_usd
+
+
+def calculate_portfolio_values(portfolio, tala_price, usd_toman, crypto_prices=None):
+    total_toman, total_usd = _portfolio_totals(portfolio, tala_price, usd_toman, crypto_prices)
     baseline_toman = portfolio['baseline_total_toman'] or 0
     baseline_usd = portfolio['baseline_total_usd'] or 0
     pnl_toman = total_toman - baseline_toman
@@ -344,6 +468,19 @@ def calculate_portfolio_values(portfolio, tala_price, usd_toman):
         'pnl_usd': pnl_usd,
         'pnl_pct': pnl_pct,
     }
+
+
+def fetch_portfolio_market_prices():
+    """Fetch gold/USD and crypto prices for portfolio valuation."""
+    tala_price, _, usd_toman, gold_stale = fetch_current_prices()
+    crypto_prices = {}
+    crypto_stale = False
+    try:
+        crypto_prices, crypto_stale = fetch_current_crypto_prices()
+    except Exception:
+        crypto_prices = get_latest_crypto_prices()
+        crypto_stale = bool(crypto_prices)
+    return tala_price, usd_toman, crypto_prices, (gold_stale or crypto_stale)
 
 def update_user_settings(user_id, notifications=None, notification_flags=None, buy_threshold=None, wait_threshold=None, significant_move_threshold=None): 
     conn = sqlite3.connect('gold_bot.db')
@@ -841,7 +978,7 @@ def generate_price_chart():
     set_persian_title(ax, LBL_GOLD_COMPARISON_24H)
     persian_legend(ax)
     ax.grid(True, alpha=0.3)
-    plt.setp(ax.get_xticklabels(), rotation=45)
+    apply_rtl_xaxis(ax)
     return finalize_chart(fig)
 
 def generate_usd_price_chart():
@@ -866,7 +1003,7 @@ def generate_usd_price_chart():
     set_persian_title(ax, LBL_USD_CHART)
     persian_legend(ax)
     ax.grid(True, alpha=0.3)
-    plt.setp(ax.get_xticklabels(), rotation=45)
+    apply_rtl_xaxis(ax)
     return finalize_chart(fig)
 
 def generate_ounce_price_chart():
@@ -891,7 +1028,7 @@ def generate_ounce_price_chart():
     set_persian_title(ax, LBL_OUNCE_CHART)
     persian_legend(ax)
     ax.grid(True, alpha=0.3)
-    plt.setp(ax.get_xticklabels(), rotation=45)
+    apply_rtl_xaxis(ax)
     return finalize_chart(fig)
 
 def generate_price_chart_by_timeframe(start_time, end_time):
@@ -915,7 +1052,7 @@ def generate_price_chart_by_timeframe(start_time, end_time):
     set_persian_title(ax, LBL_GOLD_COMPARISON)
     persian_legend(ax)
     ax.grid(True, alpha=0.3)
-    plt.setp(ax.get_xticklabels(), rotation=45)
+    apply_rtl_xaxis(ax)
     return finalize_chart(fig)
 
 def generate_usd_price_chart_by_timeframe(start_time, end_time):
@@ -944,7 +1081,7 @@ def generate_usd_price_chart_by_timeframe(start_time, end_time):
     set_persian_title(ax, LBL_USD_CHART)
     persian_legend(ax)
     ax.grid(True, alpha=0.3)
-    plt.setp(ax.get_xticklabels(), rotation=45)
+    apply_rtl_xaxis(ax)
     return finalize_chart(fig)
 
 def generate_ounce_price_chart_by_timeframe(start_time, end_time):
@@ -973,7 +1110,7 @@ def generate_ounce_price_chart_by_timeframe(start_time, end_time):
     set_persian_title(ax, LBL_OUNCE_CHART)
     persian_legend(ax)
     ax.grid(True, alpha=0.3)
-    plt.setp(ax.get_xticklabels(), rotation=45)
+    apply_rtl_xaxis(ax)
     return finalize_chart(fig)
 
 def requests_session_with_retries():
@@ -1121,7 +1258,7 @@ def generate_user_growth_chart(days=30):
     set_persian_ylabel(ax, LBL_USER_COUNT)
     set_persian_title(ax, fa_period_title(LBL_USER_GROWTH, days, LBL_DAYS_AGO))
     ax.grid(True, alpha=0.3)
-    plt.setp(ax.get_xticklabels(), rotation=45)
+    apply_rtl_xaxis(ax)
     return finalize_chart(fig)
 
 def generate_price_difference_chart(days=7):
@@ -1154,7 +1291,7 @@ def generate_price_difference_chart(days=7):
     set_persian_title(ax, fa_period_title(LBL_PRICE_DIFF_TREND, days, LBL_DAYS_AGO))
     persian_legend(ax)
     ax.grid(True, alpha=0.3)
-    plt.setp(ax.get_xticklabels(), rotation=45)
+    apply_rtl_xaxis(ax)
     return finalize_chart(fig)
 
 def generate_detailed_history_chart(start_time, end_time):
@@ -1205,7 +1342,8 @@ def generate_detailed_history_chart(start_time, end_time):
     persian_legend(ax2)
     ax2.grid(True, alpha=0.3)
 
-    plt.setp(ax2.get_xticklabels(), rotation=45)
+    apply_rtl_xaxis(ax1)
+    apply_rtl_xaxis(ax2)
     return finalize_chart(fig)
 
 
@@ -1230,7 +1368,7 @@ def generate_crypto_price_chart(symbol: str, start_time, end_time):
     label = CRYPTO_SYMBOL_LABELS.get(symbol, symbol)
     set_persian_title(ax, f"{label} ({symbol})")
     ax.grid(True, alpha=0.3)
-    plt.setp(ax.get_xticklabels(), rotation=45)
+    apply_rtl_xaxis(ax)
     return finalize_chart(fig)
 
 # ================= AUDIT LOGGING =================
@@ -1315,10 +1453,56 @@ async def delete_message_safe(message):
 def clear_nav_state(context):
     context.user_data.pop('waiting_for_calc', None)
     context.user_data.pop('setting_threshold', None)
-    context.user_data.pop('portfolio_gold', None)
-    context.user_data.pop('portfolio_toman', None)
+    _clear_portfolio_setup_data(context)
     context.user_data.pop(STORE_PREV_MENU, None)
     context.user_data.pop('requested_chart_type', None)
+
+
+def _clear_portfolio_setup_data(context):
+    context.user_data.pop('portfolio_gold', None)
+    context.user_data.pop('portfolio_toman', None)
+    context.user_data.pop('portfolio_usd', None)
+    context.user_data.pop('portfolio_is_update', None)
+    context.user_data.pop('portfolio_existing', None)
+    for key in PORTFOLIO_CRYPTO_KEYS.values():
+        context.user_data.pop(key, None)
+
+
+def _init_portfolio_update(context, user_id):
+    _clear_portfolio_setup_data(context)
+    portfolio = get_user_portfolio(user_id)
+    if not portfolio:
+        return
+    context.user_data['portfolio_is_update'] = True
+    context.user_data['portfolio_existing'] = portfolio
+    for step in PORTFOLIO_SETUP_STEPS:
+        context.user_data[step['data_key']] = portfolio[step['portfolio_key']]
+
+
+def _portfolio_show_continue(context) -> bool:
+    return bool(context.user_data.get('portfolio_is_update'))
+
+
+def _portfolio_current_for_step(context, step):
+    if step['data_key'] in context.user_data:
+        return context.user_data[step['data_key']]
+    existing = context.user_data.get('portfolio_existing')
+    if existing:
+        return existing.get(step['portfolio_key']) or 0
+    return 0
+
+
+def _portfolio_setup_is_empty(context) -> bool:
+    amounts = [
+        context.user_data.get('portfolio_gold', 0),
+        context.user_data.get('portfolio_toman', 0),
+        context.user_data.get('portfolio_usd', 0),
+        context.user_data.get('portfolio_btc', 0),
+        context.user_data.get('portfolio_eth', 0),
+        context.user_data.get('portfolio_trx', 0),
+        context.user_data.get('portfolio_usdt', 0),
+    ]
+    return all(v == 0 for v in amounts)
 
 
 async def send_portfolio_view(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user):
@@ -1330,18 +1514,23 @@ async def send_portfolio_view(context: ContextTypes.DEFAULT_TYPE, chat_id: int, 
         )
         return
     try:
-        tala_price, _, usd_toman, stale = fetch_current_prices()
+        tala_price, usd_toman, crypto_prices, stale = fetch_portfolio_market_prices()
     except Exception:
         await context.bot.send_message(
             chat_id, msg.ERROR_FETCH, parse_mode="Markdown", reply_markup=kb_back(NAV_MAIN)
         )
         return
-    values = calculate_portfolio_values(portfolio, tala_price, usd_toman)
+    values = calculate_portfolio_values(portfolio, tala_price, usd_toman, crypto_prices)
     stale_note = msg.STALE_DATA_NOTE if stale else ""
     text = msg.portfolio_view(
         gold_grams=portfolio['gold_grams'],
         cash_toman=portfolio['cash_toman'],
         cash_usd=portfolio['cash_usd'],
+        crypto_btc=portfolio['crypto_btc'],
+        crypto_eth=portfolio['crypto_eth'],
+        crypto_trx=portfolio['crypto_trx'],
+        crypto_usdt=portfolio['crypto_usdt'],
+        crypto_prices=crypto_prices,
         total_toman=values['total_toman'],
         total_usd=values['total_usd'],
         pnl_toman=values['pnl_toman'],
@@ -1388,6 +1577,10 @@ async def show_menu(context: ContextTypes.DEFAULT_TYPE, chat_id: int, menu_id: s
         )
     elif menu_id == NAV_PORTFOLIO:
         await send_portfolio_view(context, chat_id, user)
+    elif menu_id == NAV_CHARTS:
+        await context.bot.send_message(
+            chat_id, msg.CHARTS_MENU, parse_mode="Markdown", reply_markup=charts_menu_keyboard()
+        )
     elif menu_id == NAV_CRYPTO:
         await send_crypto_prices(context, chat_id)
     elif menu_id == NAV_ADMIN:
@@ -1494,9 +1687,7 @@ def main_menu_keyboard():
         [InlineKeyboardButton(msg.BTN_CALC, callback_data="calc")],
         [InlineKeyboardButton(msg.BTN_PORTFOLIO, callback_data="portfolio")],
         [InlineKeyboardButton(msg.BTN_CRYPTO, callback_data="crypto_menu")],
-        [InlineKeyboardButton(msg.BTN_CHART_GOLD, callback_data="chart")],
-        [InlineKeyboardButton(msg.BTN_CHART_USD, callback_data="usd_chart")],
-        [InlineKeyboardButton(msg.BTN_CHART_OUNCE, callback_data="ounce_chart")],
+        [InlineKeyboardButton(msg.BTN_CHARTS, callback_data="charts_menu")],
         [InlineKeyboardButton(msg.BTN_HISTORY, callback_data="history_menu"),
          InlineKeyboardButton(msg.BTN_SETTINGS, callback_data="settings")],
         [InlineKeyboardButton(msg.BTN_ABOUT, callback_data="about_us")],
@@ -1511,8 +1702,29 @@ def portfolio_keyboard():
     ]
     return InlineKeyboardMarkup(keyboard)
 
-def portfolio_setup_keyboard(back_target=NAV_PORTFOLIO):
-    return InlineKeyboardMarkup([back_row(back_target)])
+def portfolio_setup_keyboard(back_target=NAV_PORTFOLIO, show_continue=False, step_id=None):
+    rows = []
+    if show_continue and step_id:
+        rows.append([
+            InlineKeyboardButton(msg.BTN_PORTFOLIO_CONTINUE, callback_data=f"portfolio_keep:{step_id}")
+        ])
+    rows.append(back_row(back_target))
+    return InlineKeyboardMarkup(rows)
+
+def charts_menu_keyboard():
+    """Keyboard for the charts sub-menu."""
+    keyboard = [
+        [InlineKeyboardButton(msg.BTN_CHART_GOLD, callback_data="chart")],
+        [InlineKeyboardButton(msg.BTN_CHART_USD, callback_data="usd_chart")],
+        [InlineKeyboardButton(msg.BTN_CHART_OUNCE, callback_data="ounce_chart")],
+        [InlineKeyboardButton(msg.BTN_CRYPTO_BTC, callback_data="crypto_chart:BTC"),
+         InlineKeyboardButton(msg.BTN_CRYPTO_ETH, callback_data="crypto_chart:ETH")],
+        [InlineKeyboardButton(msg.BTN_CRYPTO_TRX, callback_data="crypto_chart:TRX"),
+         InlineKeyboardButton(msg.BTN_CRYPTO_USDT, callback_data="crypto_chart:USDT")],
+        back_row(NAV_MAIN),
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
 
 def chart_timeframe_keyboard():
     """Keyboard for selecting chart timeframe."""
@@ -1522,7 +1734,7 @@ def chart_timeframe_keyboard():
         [InlineKeyboardButton("7d", callback_data="tf_7d"),
          InlineKeyboardButton("30d", callback_data="tf_30d")],
         [InlineKeyboardButton("6m", callback_data="tf_6m")],
-        back_row(NAV_MAIN),
+        back_row(NAV_CHARTS),
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -1716,7 +1928,7 @@ async def show_history_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 async def show_chart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Initiates chart timeframe selection conversation."""
     query = update.callback_query
-    context.user_data[STORE_PREV_MENU] = NAV_MAIN
+    context.user_data[STORE_PREV_MENU] = NAV_CHARTS
     context.user_data['requested_chart_type'] = 'gold'
     await query.answer()
     chat_id = query.message.chat_id
@@ -1729,7 +1941,7 @@ async def show_chart(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def show_usd_chart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Initiates USD chart timeframe selection conversation."""
     query = update.callback_query
-    context.user_data[STORE_PREV_MENU] = NAV_MAIN
+    context.user_data[STORE_PREV_MENU] = NAV_CHARTS
     context.user_data['requested_chart_type'] = 'usd'
     await query.answer()
     chat_id = query.message.chat_id
@@ -1742,7 +1954,7 @@ async def show_usd_chart(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def show_ounce_chart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Initiates Ounce chart timeframe selection conversation."""
     query = update.callback_query
-    context.user_data[STORE_PREV_MENU] = NAV_MAIN
+    context.user_data[STORE_PREV_MENU] = NAV_CHARTS
     context.user_data['requested_chart_type'] = 'ounce'
     await query.answer()
     chat_id = query.message.chat_id
@@ -2201,6 +2413,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await about_us(update, context, query)
     elif query.data == "help":
         await help_menu(update, context, query)
+    elif query.data == "charts_menu":
+        await open_menu_from_callback(update, context, NAV_CHARTS)
     elif query.data == "crypto_menu":
         await crypto_menu(update, context, query)
     elif query.data == "crypto_refresh":
@@ -2255,19 +2469,24 @@ async def portfolio_show(update: Update, context: ContextTypes.DEFAULT_TYPE, que
         return ConversationHandler.END
 
     try:
-        tala_price, _, usd_toman, stale = fetch_current_prices()
+        tala_price, usd_toman, crypto_prices, stale = fetch_portfolio_market_prices()
     except Exception:
         await context.bot.send_message(
             chat_id, msg.ERROR_FETCH, parse_mode="Markdown", reply_markup=kb_back(NAV_MAIN)
         )
         return ConversationHandler.END
 
-    values = calculate_portfolio_values(portfolio, tala_price, usd_toman)
+    values = calculate_portfolio_values(portfolio, tala_price, usd_toman, crypto_prices)
     stale_note = msg.STALE_DATA_NOTE if stale else ""
     text = msg.portfolio_view(
         gold_grams=portfolio['gold_grams'],
         cash_toman=portfolio['cash_toman'],
         cash_usd=portfolio['cash_usd'],
+        crypto_btc=portfolio['crypto_btc'],
+        crypto_eth=portfolio['crypto_eth'],
+        crypto_trx=portfolio['crypto_trx'],
+        crypto_usdt=portfolio['crypto_usdt'],
+        crypto_prices=crypto_prices,
         total_toman=values['total_toman'],
         total_usd=values['total_usd'],
         pnl_toman=values['pnl_toman'],
@@ -2294,24 +2513,13 @@ async def portfolio_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if user_has_portfolio(user.id):
             return await portfolio_show(update, context, query)
         await delete_message_safe(query.message)
-        await context.bot.send_message(
-            query.message.chat_id,
-            msg.PORTFOLIO_PROMPT_GOLD,
-            parse_mode="Markdown",
-            reply_markup=portfolio_setup_keyboard(NAV_MAIN),
-        )
-        return ASK_PORTFOLIO_GOLD
+        return await _portfolio_send_step(context, query.message.chat_id, user.id, 0)
 
     user = update.effective_user
     add_or_update_user(user.id, user.username, user.first_name)
     if user_has_portfolio(user.id):
         return await portfolio_show(update, context)
-    await update.message.reply_text(
-        msg.PORTFOLIO_PROMPT_GOLD,
-        parse_mode="Markdown",
-        reply_markup=portfolio_setup_keyboard(NAV_MAIN),
-    )
-    return ASK_PORTFOLIO_GOLD
+    return await _portfolio_send_step(context, update.message.chat_id, user.id, 0)
 
 
 async def portfolio_cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2319,123 +2527,205 @@ async def portfolio_cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def portfolio_update_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    add_or_update_user(user.id, user.username, user.first_name)
+    _init_portfolio_update(context, user.id)
     query = update.callback_query
     if query:
         await query.answer()
         await delete_message_safe(query.message)
-        await context.bot.send_message(
-            query.message.chat_id,
-            msg.PORTFOLIO_PROMPT_GOLD,
-            parse_mode="Markdown",
-            reply_markup=portfolio_setup_keyboard(NAV_PORTFOLIO),
-        )
-    elif update.message:
-        await update.message.reply_text(
-            msg.PORTFOLIO_PROMPT_GOLD,
-            parse_mode="Markdown",
-            reply_markup=portfolio_setup_keyboard(NAV_PORTFOLIO),
-        )
-    return ASK_PORTFOLIO_GOLD
+        return await _portfolio_send_step(context, query.message.chat_id, user.id, 0)
+    return await _portfolio_send_step(context, update.message.chat_id, user.id, 0)
 
 
 def portfolio_setup_back_target(user_id):
     return NAV_PORTFOLIO if user_has_portfolio(user_id) else NAV_MAIN
 
 
-async def portfolio_gold_grams(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    back_target = portfolio_setup_back_target(update.effective_user.id)
+async def _portfolio_send_step(context, chat_id, user_id, step_index):
+    step = PORTFOLIO_SETUP_STEPS[step_index]
+    show_current = _portfolio_show_continue(context)
+    current = _portfolio_current_for_step(context, step)
+    back_target = portfolio_setup_back_target(user_id)
+    text = step['prompt'](current, show_current=show_current)
+    kb = portfolio_setup_keyboard(back_target, show_continue=show_current, step_id=step['step_id'])
+    await context.bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=kb)
+    return step['state']
+
+
+async def _portfolio_finish_setup(context, chat_id, user_id):
+    back_target = portfolio_setup_back_target(user_id)
+    if _portfolio_setup_is_empty(context):
+        await context.bot.send_message(
+            chat_id, msg.PORTFOLIO_EMPTY_ERROR, parse_mode="Markdown", reply_markup=kb_back(NAV_MAIN)
+        )
+        _clear_portfolio_setup_data(context)
+        return ConversationHandler.END
+
     try:
-        value = float(update.message.text.replace(",", "").strip())
+        tala_price, usd_toman, crypto_prices, _ = fetch_portfolio_market_prices()
+    except Exception:
+        await context.bot.send_message(chat_id, msg.ERROR_FETCH, reply_markup=kb_back(back_target))
+        return ConversationHandler.END
+
+    save_user_portfolio(
+        user_id,
+        context.user_data.get('portfolio_gold', 0),
+        context.user_data.get('portfolio_toman', 0),
+        context.user_data.get('portfolio_usd', 0),
+        context.user_data.get('portfolio_btc', 0),
+        context.user_data.get('portfolio_eth', 0),
+        context.user_data.get('portfolio_trx', 0),
+        context.user_data.get('portfolio_usdt', 0),
+        tala_price,
+        usd_toman,
+        crypto_prices,
+    )
+    _clear_portfolio_setup_data(context)
+
+    await context.bot.send_message(
+        chat_id, msg.PORTFOLIO_SAVED, parse_mode="Markdown", reply_markup=portfolio_keyboard()
+    )
+    portfolio = get_user_portfolio(user_id)
+    if portfolio and user_has_portfolio(user_id):
+        try:
+            tala_price, usd_toman, crypto_prices, stale = fetch_portfolio_market_prices()
+            values = calculate_portfolio_values(portfolio, tala_price, usd_toman, crypto_prices)
+            stale_note = msg.STALE_DATA_NOTE if stale else ""
+            text = msg.portfolio_view(
+                gold_grams=portfolio['gold_grams'],
+                cash_toman=portfolio['cash_toman'],
+                cash_usd=portfolio['cash_usd'],
+                crypto_btc=portfolio['crypto_btc'],
+                crypto_eth=portfolio['crypto_eth'],
+                crypto_trx=portfolio['crypto_trx'],
+                crypto_usdt=portfolio['crypto_usdt'],
+                crypto_prices=crypto_prices,
+                total_toman=values['total_toman'],
+                total_usd=values['total_usd'],
+                pnl_toman=values['pnl_toman'],
+                pnl_usd=values['pnl_usd'],
+                pnl_pct=values['pnl_pct'],
+                tala_price=tala_price,
+                usd_toman=usd_toman,
+                updated_at=portfolio['portfolio_updated_at'],
+                stale_note=stale_note,
+            )
+            await context.bot.send_message(
+                chat_id, text, parse_mode="Markdown", reply_markup=portfolio_keyboard()
+            )
+        except Exception:
+            pass
+    return ConversationHandler.END
+
+
+async def _portfolio_advance_from_step(context, chat_id, user_id, step_index):
+    next_index = step_index + 1
+    if next_index >= len(PORTFOLIO_SETUP_STEPS):
+        return await _portfolio_finish_setup(context, chat_id, user_id)
+    return await _portfolio_send_step(context, chat_id, user_id, next_index)
+
+
+async def _portfolio_handle_amount(update, context, step_index):
+    step = PORTFOLIO_SETUP_STEPS[step_index]
+    user = update.effective_user
+    back_target = portfolio_setup_back_target(user.id)
+    show_continue = _portfolio_show_continue(context)
+    try:
+        raw = update.message.text.replace(",", "").strip()
+        value = step['parser'](raw)
         if value < 0:
             raise ValueError
     except ValueError:
-        await update.message.reply_text(msg.ERROR_NON_NEGATIVE, reply_markup=portfolio_setup_keyboard(back_target))
-        return ASK_PORTFOLIO_GOLD
-    context.user_data['portfolio_gold'] = value
-    await update.message.reply_text(
-        msg.PORTFOLIO_PROMPT_TOMAN, parse_mode="Markdown", reply_markup=portfolio_setup_keyboard(back_target)
-    )
-    return ASK_PORTFOLIO_TOMAN
+        await update.message.reply_text(
+            msg.ERROR_NON_NEGATIVE,
+            reply_markup=portfolio_setup_keyboard(back_target, show_continue, step['step_id']),
+        )
+        return step['state']
+
+    context.user_data[step['data_key']] = value
+    return await _portfolio_advance_from_step(context, update.message.chat_id, user.id, step_index)
+
+
+async def portfolio_gold_grams(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    return await _portfolio_handle_amount(update, context, 0)
 
 
 async def portfolio_cash_toman(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    back_target = portfolio_setup_back_target(update.effective_user.id)
-    try:
-        value = int(update.message.text.replace(",", "").strip())
-        if value < 0:
-            raise ValueError
-    except ValueError:
-        await update.message.reply_text(msg.ERROR_NON_NEGATIVE, reply_markup=portfolio_setup_keyboard(back_target))
-        return ASK_PORTFOLIO_TOMAN
-    context.user_data['portfolio_toman'] = value
-    await update.message.reply_text(
-        msg.PORTFOLIO_PROMPT_USD, parse_mode="Markdown", reply_markup=portfolio_setup_keyboard(back_target)
-    )
-    return ASK_PORTFOLIO_USD
+    return await _portfolio_handle_amount(update, context, 1)
 
 
 async def portfolio_cash_usd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    back_target = portfolio_setup_back_target(user.id)
-    try:
-        value = float(update.message.text.replace(",", "").strip())
-        if value < 0:
-            raise ValueError
-    except ValueError:
-        await update.message.reply_text(msg.ERROR_NON_NEGATIVE, reply_markup=portfolio_setup_keyboard(back_target))
-        return ASK_PORTFOLIO_USD
+    return await _portfolio_handle_amount(update, context, 2)
 
-    gold_grams = context.user_data.get('portfolio_gold', 0)
-    cash_toman = context.user_data.get('portfolio_toman', 0)
-    cash_usd = value
 
-    if gold_grams == 0 and cash_toman == 0 and cash_usd == 0:
-        await update.message.reply_text(msg.PORTFOLIO_EMPTY_ERROR, parse_mode="Markdown", reply_markup=kb_back(NAV_MAIN))
-        context.user_data.pop('portfolio_gold', None)
-        context.user_data.pop('portfolio_toman', None)
+async def portfolio_crypto_btc(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    return await _portfolio_handle_amount(update, context, 3)
+
+
+async def portfolio_crypto_eth(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    return await _portfolio_handle_amount(update, context, 4)
+
+
+async def portfolio_crypto_trx(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    return await _portfolio_handle_amount(update, context, 5)
+
+
+async def portfolio_crypto_usdt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    return await _portfolio_handle_amount(update, context, 6)
+
+
+async def portfolio_keep_current(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    step_id = query.data.split(":", 1)[1]
+    step = PORTFOLIO_STEP_BY_ID.get(step_id)
+    if not step:
         return ConversationHandler.END
-
-    try:
-        tala_price, _, usd_toman, _ = fetch_current_prices()
-    except Exception:
-        await update.message.reply_text(msg.ERROR_FETCH, reply_markup=kb_back(back_target))
-        return ConversationHandler.END
-
-    save_user_portfolio(user.id, gold_grams, cash_toman, cash_usd, tala_price, usd_toman)
-    context.user_data.pop('portfolio_gold', None)
-    context.user_data.pop('portfolio_toman', None)
-
-    await update.message.reply_text(msg.PORTFOLIO_SAVED, parse_mode="Markdown", reply_markup=portfolio_keyboard())
-    await portfolio_show(update, context)
-    return ConversationHandler.END
+    step_index = PORTFOLIO_SETUP_STEPS.index(step)
+    user = query.from_user
+    add_or_update_user(user.id, user.username, user.first_name)
+    await delete_message_safe(query.message)
+    return await _portfolio_advance_from_step(context, query.message.chat_id, user.id, step_index)
 
 
 async def send_portfolio_daily_report(context: ContextTypes.DEFAULT_TYPE):
     try:
         logger.info("Starting portfolio daily report.")
-        tala_price, _, usd_toman, _ = fetch_current_prices()
+        tala_price, usd_toman, crypto_prices, _ = fetch_portfolio_market_prices()
         users = get_users_with_portfolio_notifications()
         date_str = datetime.now(TEHRAN_TZ).strftime('%Y-%m-%d')
         success_count = 0
         failed_count = 0
 
         for row in users:
-            user_id, gold_grams, cash_toman, cash_usd, baseline_toman, baseline_usd, flags = row
+            (user_id, gold_grams, cash_toman, cash_usd,
+             crypto_btc, crypto_eth, crypto_trx, crypto_usdt,
+             baseline_toman, baseline_usd, flags) = row
             if not (flags & NOTIF_PORTFOLIO):
                 continue
             portfolio = {
                 'gold_grams': gold_grams or 0,
                 'cash_toman': cash_toman or 0,
                 'cash_usd': cash_usd or 0,
+                'crypto_btc': crypto_btc or 0,
+                'crypto_eth': crypto_eth or 0,
+                'crypto_trx': crypto_trx or 0,
+                'crypto_usdt': crypto_usdt or 0,
                 'baseline_total_toman': baseline_toman,
                 'baseline_total_usd': baseline_usd,
             }
-            values = calculate_portfolio_values(portfolio, tala_price, usd_toman)
+            values = calculate_portfolio_values(portfolio, tala_price, usd_toman, crypto_prices)
             report = msg.portfolio_daily_report(
                 date_str=date_str,
                 gold_grams=portfolio['gold_grams'],
                 cash_toman=portfolio['cash_toman'],
                 cash_usd=portfolio['cash_usd'],
+                crypto_btc=portfolio['crypto_btc'],
+                crypto_eth=portfolio['crypto_eth'],
+                crypto_trx=portfolio['crypto_trx'],
+                crypto_usdt=portfolio['crypto_usdt'],
+                crypto_prices=crypto_prices,
                 total_toman=values['total_toman'],
                 total_usd=values['total_usd'],
                 pnl_toman=values['pnl_toman'],
@@ -3164,14 +3454,37 @@ def main():
         states={
             ASK_PORTFOLIO_GOLD: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, portfolio_gold_grams),
+                CallbackQueryHandler(portfolio_keep_current, pattern='^portfolio_keep:'),
                 CallbackQueryHandler(handle_nav_back, pattern='^nav_back:'),
             ],
             ASK_PORTFOLIO_TOMAN: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, portfolio_cash_toman),
+                CallbackQueryHandler(portfolio_keep_current, pattern='^portfolio_keep:'),
                 CallbackQueryHandler(handle_nav_back, pattern='^nav_back:'),
             ],
             ASK_PORTFOLIO_USD: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, portfolio_cash_usd),
+                CallbackQueryHandler(portfolio_keep_current, pattern='^portfolio_keep:'),
+                CallbackQueryHandler(handle_nav_back, pattern='^nav_back:'),
+            ],
+            ASK_PORTFOLIO_BTC: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, portfolio_crypto_btc),
+                CallbackQueryHandler(portfolio_keep_current, pattern='^portfolio_keep:'),
+                CallbackQueryHandler(handle_nav_back, pattern='^nav_back:'),
+            ],
+            ASK_PORTFOLIO_ETH: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, portfolio_crypto_eth),
+                CallbackQueryHandler(portfolio_keep_current, pattern='^portfolio_keep:'),
+                CallbackQueryHandler(handle_nav_back, pattern='^nav_back:'),
+            ],
+            ASK_PORTFOLIO_TRX: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, portfolio_crypto_trx),
+                CallbackQueryHandler(portfolio_keep_current, pattern='^portfolio_keep:'),
+                CallbackQueryHandler(handle_nav_back, pattern='^nav_back:'),
+            ],
+            ASK_PORTFOLIO_USDT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, portfolio_crypto_usdt),
+                CallbackQueryHandler(portfolio_keep_current, pattern='^portfolio_keep:'),
                 CallbackQueryHandler(handle_nav_back, pattern='^nav_back:'),
             ],
         },

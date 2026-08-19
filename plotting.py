@@ -111,6 +111,12 @@ CRYPTO_SYMBOL_LABELS = {
 LBL_CRYPTO_TOMAN = "قیمت تومان"
 
 
+def apply_rtl_xaxis(ax):
+    """Invert x-axis so time flows right-to-left (RTL reading order)."""
+    ax.invert_xaxis()
+    plt.setp(ax.get_xticklabels(), rotation=-45, ha='left')
+
+
 def persian_legend(ax=None, **kwargs):
     """Legend with Persian font on label text."""
     ax = ax or plt.gca()
