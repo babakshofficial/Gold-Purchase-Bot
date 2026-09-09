@@ -60,9 +60,9 @@ def welcome_message(buy_threshold: int, wait_threshold: int) -> str:
         "⚠️ **تذکر:**\n"
         "پیشنهادهای این ربات صرفاً تحلیلی هستند. مسئولیت هر تصمیم مالی با خود شماست.\n\n"
         "📏 **قوانین تصمیم‌گیری (پیش‌فرض):**\n"
-        f"🟢 اختلاف کمتر از {buy_threshold:,} تومان → خرید\n"
-        f"🟡 اختلاف {buy_threshold:,} تا {wait_threshold:,} تومان → صبر و رصد\n"
-        f"🔴 اختلاف بیش از {wait_threshold:,} تومان → فروش\n\n"
+        f"🟢 اختلاف ≤ −{buy_threshold:,} تومان → خرید\n"
+        f"🟡 −{buy_threshold:,} < اختلاف < {wait_threshold:,} تومان → نگهداری\n"
+        f"🔴 اختلاف ≥ {wait_threshold:,} تومان → فروش\n\n"
         "👇 از منوی زیر شروع کنید:"
     )
 

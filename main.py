@@ -942,20 +942,26 @@ def fetch_and_parse_usd():
 
 
 def analyze_market(tala, usd_toman, ounce, buy_threshold, wait_threshold):
+    """Signal from market−fair difference vs absolute thresholds.
+
+    BUY  when var <= -buy_threshold
+    SELL when var >= +wait_threshold (sell threshold)
+    HOLD when -buy_threshold < var < wait_threshold
+    """
     fair_price = usd_toman * ounce / 41.5
     var = tala - fair_price
-    if var < buy_threshold:
+    if var <= -buy_threshold:
         verdict = msg.verdict_buy()
         emoji = "🟢"
         status = "BUY"
-    elif var < wait_threshold:
-        verdict = msg.verdict_wait()
-        emoji = "🟡"
-        status = "WAIT"
-    else:
+    elif var >= wait_threshold:
         verdict = msg.verdict_sell()
         emoji = "🔴"
         status = "SELL"
+    else:
+        verdict = msg.verdict_wait()
+        emoji = "🟡"
+        status = "HOLD"
     return fair_price, var, verdict, emoji, status
 
 def generate_price_chart():
@@ -1261,6 +1267,15 @@ def generate_user_growth_chart(days=30):
     apply_rtl_xaxis(ax)
     return finalize_chart(fig)
 
+def _diff_signal_color(diff: float) -> str:
+    """Green=BUY, yellow=HOLD, red=SELL based on default absolute thresholds."""
+    if diff <= -DEFAULT_BUY_THRESHOLD:
+        return '#4CAF50'
+    if diff >= DEFAULT_WAIT_THRESHOLD:
+        return '#F44336'
+    return '#FFC107'
+
+
 def generate_price_difference_chart(days=7):
     """Generate price difference trend chart with Persian labels."""
     end_time = datetime.now()
@@ -1271,20 +1286,12 @@ def generate_price_difference_chart(days=7):
 
     timestamps = [datetime.fromisoformat(h[0]) for h in history]
     differences = [h[3] for h in history]
-
-    colors = []
-    for diff in differences:
-        if diff < DEFAULT_BUY_THRESHOLD:
-            colors.append('#4CAF50')
-        elif diff < DEFAULT_WAIT_THRESHOLD:
-            colors.append('#FFC107')
-        else:
-            colors.append('#F44336')
+    colors = [_diff_signal_color(diff) for diff in differences]
 
     fig, ax = plt.subplots(figsize=(12, 6))
     ax.scatter(timestamps, differences, c=colors, s=50, alpha=0.6)
     ax.plot(timestamps, differences, linewidth=1, alpha=0.5, color='gray')
-    ax.axhline(y=DEFAULT_BUY_THRESHOLD, color='green', linestyle='--', label=fa(LBL_BUY_THRESHOLD), alpha=0.7)
+    ax.axhline(y=-DEFAULT_BUY_THRESHOLD, color='green', linestyle='--', label=fa(LBL_BUY_THRESHOLD), alpha=0.7)
     ax.axhline(y=DEFAULT_WAIT_THRESHOLD, color='red', linestyle='--', label=fa(LBL_SELL_THRESHOLD), alpha=0.7)
     set_persian_xlabel(ax, LBL_TIME)
     set_persian_ylabel(ax, LBL_PRICE_DIFF)
@@ -1323,18 +1330,11 @@ def generate_detailed_history_chart(start_time, end_time):
     persian_legend(ax1)
     ax1.grid(True, alpha=0.3)
 
-    colors = []
-    for diff in differences:
-        if diff < DEFAULT_BUY_THRESHOLD:
-            colors.append('#4CAF50')
-        elif diff < DEFAULT_WAIT_THRESHOLD:
-            colors.append('#FFC107')
-        else:
-            colors.append('#F44336')
+    colors = [_diff_signal_color(diff) for diff in differences]
 
     ax2.scatter(timestamps, differences, c=colors, s=50, alpha=0.6)
     ax2.plot(timestamps, differences, linewidth=1, alpha=0.5, color='gray')
-    ax2.axhline(y=DEFAULT_BUY_THRESHOLD, color='green', linestyle='--', label=fa(LBL_BUY_THRESHOLD), alpha=0.7)
+    ax2.axhline(y=-DEFAULT_BUY_THRESHOLD, color='green', linestyle='--', label=fa(LBL_BUY_THRESHOLD), alpha=0.7)
     ax2.axhline(y=DEFAULT_WAIT_THRESHOLD, color='red', linestyle='--', label=fa(LBL_SELL_THRESHOLD), alpha=0.7)
     set_persian_ylabel(ax2, LBL_PRICE_DIFF)
     set_persian_xlabel(ax2, LBL_TIME)
@@ -3372,7 +3372,7 @@ async def monitor_prices(context: ContextTypes.DEFAULT_TYPE):
             logger.debug(f"Monitor Prices - User {user_id}: Calculated Fair: {fair:.2f}, Diff (Var): {var:.2f}")
 
             verdict, emoji, status = determine_verdict(var, buy_thresh, wait_thresh)
-            if flags & NOTIF_BUY and var < 0 and abs(var) > buy_thresh:
+            if flags & NOTIF_BUY and var <= -buy_thresh:
                 alert_msg = msg.alert_buy(
                     analysis_time_str, verdict, int(var), tala, int(fair)
                 )
@@ -3387,7 +3387,7 @@ async def monitor_prices(context: ContextTypes.DEFAULT_TYPE):
                 except Exception as e:
                     logger.warning(f"Alert send failed for user {user_id}: {e}")
 
-            if flags & NOTIF_SELL and var > 0 and var > wait_thresh:
+            if flags & NOTIF_SELL and var >= wait_thresh:
                 alert_msg = msg.alert_sell(
                     analysis_time_str, verdict, int(var), tala, int(fair)
                 )
@@ -3425,12 +3425,12 @@ async def monitor_prices(context: ContextTypes.DEFAULT_TYPE):
 
 def determine_verdict(var, buy_thresh, wait_thresh):
     """Determine the verdict, emoji, and status based on var and thresholds."""
-    if var < buy_thresh:
+    if var <= -buy_thresh:
         return msg.verdict_alert_buy(), "🟢", "BUY"
-    elif var < wait_thresh:
-        return msg.verdict_alert_wait(), "🟡", "WAIT"
-    else:
+    elif var >= wait_thresh:
         return msg.verdict_alert_sell(), "🔴", "SELL"
+    else:
+        return msg.verdict_alert_wait(), "🟡", "HOLD"
 
 # ================= MAIN =================
 def main():
