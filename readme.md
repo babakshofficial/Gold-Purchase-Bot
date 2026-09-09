@@ -50,10 +50,21 @@ A Python-based Telegram bot designed to analyze gold prices based on global USD 
     ```
 
 5.  **Train prediction models (required for /predict and /advise):**
+    One-shot:
     ```bash
     python train_models.py
     ```
-    Re-run weekly (cron example): `0 3 * * 0 cd /path/to/gold-bot && .venv/bin/python train_models.py`
+    Periodic service (default: every 7 days, trains once on start):
+    ```bash
+    python train_service.py
+    ```
+    Env overrides (optional in `.env`):
+    ```env
+    TRAIN_INTERVAL_HOURS=168
+    TRAIN_ON_START=1
+    TRAIN_DB_PATH=gold_bot.db
+    TRAIN_MODELS_DIR=models
+    ```
     Optional: `pip install xgboost` for XGBoost; otherwise Ridge fallback is used.
 
 ## Configuration
@@ -108,7 +119,7 @@ The admin panel (accessed via `/admin`) offers:
 ## Project Structure
 
 *   `main.py`: Bot handlers, DB, jobs, charts UI.
-*   `predictor.py` / `train_models.py`: Multi-horizon price models.
+*   `predictor.py` / `train_models.py` / `train_service.py`: Multi-horizon models + periodic retrain service.
 *   `goal_engine.py`: Goal/risk → BUY/HOLD/SELL.
 *   `advisor.py`: OpenRouter Persian advice.
 *   `messages.py` / `plotting.py` / `crypto_fetch.py` / `crawler.py`.
