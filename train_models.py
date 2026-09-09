@@ -17,7 +17,7 @@ def main():
     db = sys.argv[1] if len(sys.argv) > 1 else "gold_bot.db"
     models_dir = sys.argv[2] if len(sys.argv) > 2 else "models"
     logger.info("Training from %s → %s", db, models_dir)
-    metrics = train_and_save(db_path=db, models_dir=models_dir)
+    metrics = train_and_save(db_path=db, models_dir=models_dir, triggered_by="train_models_cli")
     for horizon, m in metrics.items():
         logger.info("%s: %s", horizon, m)
     logger.info("Done.")

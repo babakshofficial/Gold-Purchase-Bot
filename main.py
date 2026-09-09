@@ -67,7 +67,17 @@ import numpy as np
 from telegram.helpers import escape_markdown 
 import messages as msg
 from crypto_fetch import fetch_crypto_prices, STAGE1_SYMBOLS, CRYPTO_CHANNEL_USERNAME
-from predictor import predict_future, models_ready, backtest_summary, daily_history_tail
+from predictor import (
+    predict_future,
+    models_ready,
+    backtest_summary,
+    daily_history_tail,
+    model_artifact_info,
+    get_training_history,
+    get_training_status,
+    train_and_save,
+    clear_models,
+)
 from goal_engine import compute_signal, GOAL_LABELS_FA, RISK_LABELS_FA, GOALS, RISKS
 from advisor import get_persian_advice
 
@@ -203,6 +213,7 @@ NAV_ADMIN_CHARTS = "admin_charts"
 NAV_ADMIN_DB = "admin_db"
 NAV_ADMIN_EXPORT = "admin_export"
 NAV_ADMIN_BROADCAST = "admin_broadcast_menu"
+NAV_ADMIN_ML = "admin_ml"
 # ================= DATABASE =================
 def init_db():
     conn = sqlite3.connect('gold_bot.db')
@@ -1665,6 +1676,14 @@ async def show_menu(context: ContextTypes.DEFAULT_TYPE, chat_id: int, menu_id: s
             parse_mode="Markdown",
             reply_markup=admin_broadcast_menu_keyboard(),
         )
+    elif menu_id == NAV_ADMIN_ML:
+        if is_admin(user.id):
+            await context.bot.send_message(
+                chat_id,
+                msg.ADMIN_ML_MENU,
+                parse_mode="Markdown",
+                reply_markup=admin_ml_keyboard(),
+            )
     elif menu_id == "calc":
         await context.bot.send_message(
             chat_id, msg.CALC_PROMPT, parse_mode="Markdown", reply_markup=kb_back(NAV_MAIN)
@@ -2655,7 +2674,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await navigate_back(update, context)
         return
 
-    if query.data.startswith("admin_") or query.data.startswith("chart_") or query.data.startswith("db_") or query.data.startswith("export_"):
+    if query.data.startswith("admin_") or query.data.startswith("chart_") or query.data.startswith("db_") or query.data.startswith("export_") or query.data.startswith("ml_"):
         await audit_log(context, query.from_user.id, query.from_user.username, f"Callback: {query.data}", f"Admin action initiated: {query.data}")
         await admin_callback_handler(update, context)
         return
@@ -3088,10 +3107,32 @@ def admin_keyboard():
         [InlineKeyboardButton(msg.BTN_ADMIN_DB, callback_data="admin_db"),
          InlineKeyboardButton(msg.BTN_ADMIN_EXPORT, callback_data="admin_export")],
         [InlineKeyboardButton(msg.BTN_ADMIN_BROADCAST, callback_data="admin_broadcast_menu")],
+        [InlineKeyboardButton(msg.BTN_ADMIN_ML, callback_data="admin_ml")],
         [InlineKeyboardButton(msg.BTN_ADMIN_HEALTH, callback_data="admin_health_check")],
         back_row(NAV_MAIN),
     ]
     return InlineKeyboardMarkup(keyboard)
+
+
+def admin_ml_keyboard():
+    keyboard = [
+        [InlineKeyboardButton(msg.BTN_ADMIN_ML_STATUS, callback_data="ml_status")],
+        [InlineKeyboardButton(msg.BTN_ADMIN_ML_METRICS, callback_data="ml_metrics")],
+        [InlineKeyboardButton(msg.BTN_ADMIN_ML_HISTORY, callback_data="ml_history")],
+        [InlineKeyboardButton(msg.BTN_ADMIN_ML_PREDICT, callback_data="ml_predict_test")],
+        [InlineKeyboardButton(msg.BTN_ADMIN_ML_TRAIN, callback_data="ml_train")],
+        [InlineKeyboardButton(msg.BTN_ADMIN_ML_CLEAR, callback_data="ml_clear_ask")],
+        back_row(NAV_ADMIN),
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+def admin_ml_clear_confirm_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ بله، پاک کن", callback_data="ml_clear_confirm")],
+        [InlineKeyboardButton("❌ انصراف", callback_data="admin_ml")],
+        back_row(NAV_ADMIN_ML),
+    ])
 
 def admin_charts_keyboard():
     """Admin charts menu keyboard"""
@@ -3337,6 +3378,100 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
 
     if query.data == "admin_menu":
         await admin_menu(update, context, query)
+    elif query.data == "admin_ml":
+        chat_id = query.message.chat_id
+        await delete_message_safe(query.message)
+        await show_menu(context, chat_id, NAV_ADMIN_ML, user)
+    elif query.data == "ml_status":
+        info = model_artifact_info()
+        await query.edit_message_text(
+            msg.admin_ml_status_message(info),
+            parse_mode="Markdown",
+            reply_markup=admin_ml_keyboard(),
+        )
+    elif query.data == "ml_metrics":
+        metrics = backtest_summary()
+        text = msg.model_metrics_message(metrics)
+        try:
+            from predictor import backtest_summary_full
+            full = backtest_summary_full()
+        except Exception:
+            full = {}
+        meta = (full or {}).get("_meta") or {}
+        if meta:
+            text += (
+                f"\n\n⏱ زمان آموزش: {meta.get('trained_at', '—')}\n"
+                f"⏳ مدت: {meta.get('duration_sec', 0):.1f}s\n"
+                f"👤 منبع: `{meta.get('triggered_by', '—')}`\n"
+                f"📦 نمونه‌ها: {meta.get('daily_samples', '—')} | ویژگی: {meta.get('feature_count', '—')}"
+            )
+        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=admin_ml_keyboard())
+    elif query.data == "ml_history":
+        entries = get_training_history(limit=8)
+        await query.edit_message_text(
+            msg.admin_ml_history_message(entries),
+            parse_mode="Markdown",
+            reply_markup=admin_ml_keyboard(),
+        )
+    elif query.data == "ml_predict_test":
+        if not models_ready():
+            await query.edit_message_text(
+                msg.PREDICT_MODELS_MISSING, parse_mode="Markdown", reply_markup=admin_ml_keyboard()
+            )
+        else:
+            await query.edit_message_text(msg.PROCESSING, reply_markup=admin_ml_keyboard())
+            try:
+                tala, ounce = fetch_and_parse_gold()
+                usd = fetch_and_parse_usd()
+            except Exception:
+                tala = ounce = usd = None
+            prediction = predict_future(live_tala=tala, live_usd=usd, live_ounce=ounce)
+            await query.edit_message_text(
+                msg.predict_message(prediction) if prediction.get("model_ready") else msg.PREDICT_MODELS_MISSING,
+                parse_mode="Markdown",
+                reply_markup=admin_ml_keyboard(),
+            )
+    elif query.data == "ml_train":
+        status = get_training_status()
+        if status.get("state") == "running":
+            await query.edit_message_text(
+                msg.ADMIN_ML_TRAIN_BUSY, parse_mode="Markdown", reply_markup=admin_ml_keyboard()
+            )
+        else:
+            await query.edit_message_text(msg.ADMIN_ML_TRAINING, reply_markup=admin_ml_keyboard())
+            try:
+                # Run in thread so event loop stays responsive for long fits
+                metrics = await asyncio.to_thread(
+                    lambda: train_and_save(
+                        db_path="gold_bot.db",
+                        models_dir="models",
+                        triggered_by=f"admin:{user.id}",
+                    )
+                )
+                text = msg.ADMIN_ML_TRAIN_DONE + "\n\n" + msg.model_metrics_message(
+                    {k: v for k, v in metrics.items() if k != "_meta"}
+                )
+                await query.edit_message_text(text, parse_mode="Markdown", reply_markup=admin_ml_keyboard())
+            except Exception as e:
+                logger.exception("Admin retrain failed")
+                await query.edit_message_text(
+                    f"{msg.ADMIN_ML_TRAIN_FAIL}\n`{e}`",
+                    parse_mode="Markdown",
+                    reply_markup=admin_ml_keyboard(),
+                )
+    elif query.data == "ml_clear_ask":
+        await query.edit_message_text(
+            msg.ADMIN_ML_CLEAR_CONFIRM,
+            parse_mode="Markdown",
+            reply_markup=admin_ml_clear_confirm_keyboard(),
+        )
+    elif query.data == "ml_clear_confirm":
+        deleted = clear_models()
+        await query.edit_message_text(
+            msg.ADMIN_ML_CLEARED + (f"\nحذف‌شده: {', '.join(deleted)}" if deleted else "\n(چیزی برای حذف نبود)"),
+            parse_mode="Markdown",
+            reply_markup=admin_ml_keyboard(),
+        )
     elif query.data == "admin_health_check":
         await admin_health_check(update, context, query)
     elif query.data == "admin_stats":

@@ -45,7 +45,7 @@ def run_training() -> bool:
 
     logger.info("Starting training: db=%s → models=%s", db, models_dir)
     try:
-        metrics = train_and_save(db_path=str(db), models_dir=models_dir)
+        metrics = train_and_save(db_path=str(db), models_dir=models_dir, triggered_by="train_service")
         for horizon, m in metrics.items():
             logger.info(
                 "Horizon %s | backend=%s | n_train=%s | n_test=%s | MAE=%s | MAPE=%s",

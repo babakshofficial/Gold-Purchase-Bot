@@ -51,6 +51,13 @@ BTN_ADMIN_DB = "💾 مدیریت دیتابیس"
 BTN_ADMIN_EXPORT = "📤 خروجی داده"
 BTN_ADMIN_BROADCAST = "📢 ارسال پیام همگانی"
 BTN_ADMIN_HEALTH = "🔍 چک سلامت"
+BTN_ADMIN_ML = "🤖 مدیریت مدل"
+BTN_ADMIN_ML_STATUS = "📊 وضعیت مدل"
+BTN_ADMIN_ML_METRICS = "🎯 دقت مدل"
+BTN_ADMIN_ML_HISTORY = "📜 تاریخچه آموزش"
+BTN_ADMIN_ML_PREDICT = "🔮 تست پیش‌بینی"
+BTN_ADMIN_ML_TRAIN = "▶️ آموزش مجدد"
+BTN_ADMIN_ML_CLEAR = "🗑 پاک کردن مدل‌ها"
 
 
 # ================= WELCOME =================
@@ -743,11 +750,100 @@ def model_metrics_message(metrics: dict) -> str:
         return "📊 متریک مدل: هنوز آموزشی ثبت نشده."
     lines = ["📊 **متریک آخرین آموزش مدل**"]
     for hor, m in metrics.items():
+        if not isinstance(m, dict):
+            continue
         lines.append(
             f"• {hor}: MAE={m.get('mae', 0):,.0f} | "
             f"MAPE={m.get('mape', 0):.1f}% | backend={m.get('backend', '?')}"
         )
     return "\n".join(lines)
+
+
+def admin_ml_status_message(info: dict) -> str:
+    ready = "✅ آماده" if info.get("ready") else "❌ آماده نیست"
+    status = info.get("status") or {}
+    state = status.get("state", "unknown")
+    state_fa = {
+        "idle": "بیکار",
+        "running": "در حال آموزش ⏳",
+        "error": "خطا ❌",
+        "unknown": "نامشخص",
+    }.get(state, state)
+    lines = [
+        "🤖 **وضعیت مدل پیش‌بینی**\n",
+        f"وضعیت فایل‌ها: {ready}",
+        f"وضعیت آموزش: {state_fa}",
+        f"موتور: `{info.get('backend', '?')}`",
+        f"تعداد ویژگی: {info.get('feature_count', 0)}",
+        f"نمونه‌های روزانه: {info.get('daily_samples', 0)}",
+        f"آخرین آموزش فایل: {info.get('trained_at') or '—'}",
+    ]
+    if status.get("message"):
+        lines.append(f"پیام: {status['message']}")
+    if status.get("last_success_at"):
+        lines.append(f"آخرین موفقیت: {status['last_success_at']}")
+    if status.get("last_duration_sec") is not None:
+        lines.append(f"مدت آخرین آموزش: {status['last_duration_sec']:.1f}s")
+    if status.get("triggered_by"):
+        lines.append(f"منبع آخرین اجرا: `{status['triggered_by']}`")
+
+    lines.append("\n**فایل‌های افق:**")
+    for hor, meta in (info.get("horizons") or {}).items():
+        mark = "✅" if meta.get("exists") else "❌"
+        lines.append(
+            f"{mark} {hor}: {meta.get('size_kb', 0)} KB"
+            + (f" | {meta.get('mtime')}" if meta.get("mtime") else "")
+        )
+
+    last = info.get("last_prediction")
+    if last and last.get("model_ready"):
+        lines.append("\n**آخرین پیش‌بینی ذخیره‌شده:**")
+        lines.append(
+            f"الان {last.get('price_now', 0):,.0f} | "
+            f"۱ر {last.get('pred_1d', 0):,.0f} ({last.get('expected_return_1d', 0):+.2f}%) | "
+            f"۷ر {last.get('expected_return_7d', 0):+.2f}% | "
+            f"۳۰ر {last.get('expected_return_30d', 0):+.2f}%"
+        )
+        if last.get("saved_at"):
+            lines.append(f"زمان: {last['saved_at']}")
+    return "\n".join(lines)
+
+
+def admin_ml_history_message(entries: list) -> str:
+    if not entries:
+        return "📜 هنوز تاریخچه آموزشی ثبت نشده است."
+    lines = ["📜 **تاریخچه آموزش (جدیدترین‌ها)**\n"]
+    for i, e in enumerate(entries, 1):
+        ok = "✅" if e.get("success") else "❌"
+        lines.append(
+            f"{i}. {ok} {e.get('trained_at', '?')}\n"
+            f"   منبع: `{e.get('triggered_by', '?')}` | مدت: {e.get('duration_sec', 0):.1f}s"
+        )
+        if e.get("success") and e.get("metrics"):
+            parts = []
+            for hor, m in e["metrics"].items():
+                if isinstance(m, dict) and "mape" in m:
+                    parts.append(f"{hor} MAPE={m['mape']:.1f}%")
+            if parts:
+                lines.append("   " + " | ".join(parts))
+        if e.get("error"):
+            lines.append(f"   خطا: {e['error'][:120]}")
+    return "\n".join(lines)
+
+
+ADMIN_ML_MENU = (
+    "🤖 **مدیریت مدل پیش‌بینی**\n"
+    "وضعیت، دقت، تاریخچه آموزش و کنترل آموزش مجدد:"
+)
+ADMIN_ML_TRAINING = "⏳ آموزش مدل شروع شد… چند لحظه صبر کنید."
+ADMIN_ML_TRAIN_DONE = "✅ آموزش مدل با موفقیت تمام شد."
+ADMIN_ML_TRAIN_FAIL = "❌ آموزش مدل ناموفق بود."
+ADMIN_ML_TRAIN_BUSY = "⏳ یک آموزش دیگر در حال اجراست. لطفاً کمی بعد دوباره تلاش کنید."
+ADMIN_ML_CLEARED = "🗑 فایل‌های مدل پاک شدند. برای استفاده دوباره آموزش دهید."
+ADMIN_ML_CLEAR_CONFIRM = (
+    "⚠️ مطمئنید مدل‌ها پاک شوند؟\n"
+    "تاریخچه آموزش نگه داشته می‌شود."
+)
 
 
 # ================= ERRORS =================

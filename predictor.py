@@ -19,6 +19,9 @@ HORIZONS = (1, 7, 30)
 FEATURE_FILE = "feature_columns.json"
 METRICS_FILE = "metrics.json"
 BACKEND_FILE = "backend.json"
+STATUS_FILE = "training_status.json"
+HISTORY_FILE = "training_history.jsonl"
+LAST_PREDICT_FILE = "last_prediction.json"
 
 try:
     from xgboost import XGBRegressor  # type: ignore
@@ -247,36 +250,244 @@ def _train_one(X: np.ndarray, y: np.ndarray) -> tuple[Any, dict]:
     return model, metrics
 
 
-def train_and_save(db_path: str = DEFAULT_DB, models_dir: Path | str = DEFAULT_MODELS_DIR) -> dict:
+def _write_status(models_dir: Path, **fields):
+    from datetime import datetime, timezone
+
+    payload = {
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        **fields,
+    }
+    (models_dir / STATUS_FILE).write_text(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def get_training_status(models_dir: Path | str = DEFAULT_MODELS_DIR) -> dict:
+    path = Path(models_dir) / STATUS_FILE
+    if not path.exists():
+        return {"state": "unknown"}
+    try:
+        return json.loads(path.read_text())
+    except Exception:
+        return {"state": "unknown"}
+
+
+def append_training_history(entry: dict, models_dir: Path | str = DEFAULT_MODELS_DIR):
     models_dir = Path(models_dir)
     models_dir.mkdir(parents=True, exist_ok=True)
+    with open(models_dir / HISTORY_FILE, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
-    data = load_daily_arrays(db_path)
-    if not data:
-        raise RuntimeError("No price history available for training")
 
-    X, names, targets = build_feature_matrix(data)
-    all_metrics: dict[str, Any] = {}
+def get_training_history(limit: int = 10, models_dir: Path | str = DEFAULT_MODELS_DIR) -> list[dict]:
+    path = Path(models_dir) / HISTORY_FILE
+    if not path.exists():
+        return []
+    lines = path.read_text(encoding="utf-8").strip().splitlines()
+    entries = []
+    for line in lines[-limit:]:
+        try:
+            entries.append(json.loads(line))
+        except Exception:
+            continue
+    return list(reversed(entries))
+
+
+def model_artifact_info(models_dir: Path | str = DEFAULT_MODELS_DIR) -> dict:
+    """Filesystem + metrics snapshot for admin monitoring."""
+    from datetime import datetime
+
+    models_dir = Path(models_dir)
+    info = {
+        "ready": models_ready(models_dir),
+        "backend": "xgboost" if HAS_XGBOOST else "ridge",
+        "models_dir": str(models_dir.resolve()),
+        "horizons": {},
+        "feature_count": 0,
+        "metrics": backtest_summary(models_dir),
+        "status": get_training_status(models_dir),
+        "trained_at": None,
+        "daily_samples": 0,
+    }
+    backend_path = models_dir / BACKEND_FILE
+    if backend_path.exists():
+        try:
+            info["backend"] = json.loads(backend_path.read_text()).get("backend", info["backend"])
+        except Exception:
+            pass
+
+    feat_path = models_dir / FEATURE_FILE
+    if feat_path.exists():
+        try:
+            info["feature_count"] = len(json.loads(feat_path.read_text()))
+        except Exception:
+            pass
+
+    metrics_path = models_dir / METRICS_FILE
+    if metrics_path.exists():
+        info["trained_at"] = datetime.fromtimestamp(metrics_path.stat().st_mtime).isoformat(timespec="seconds")
+
     for h in HORIZONS:
-        model, metrics = _train_one(X, targets[h])
-        with open(models_dir / f"model_{h}d.pkl", "wb") as f:
-            pickle.dump(model, f)
-        all_metrics[f"{h}d"] = metrics
-        logger.info("Trained model_%sd: %s", h, metrics)
+        p = models_dir / f"model_{h}d.pkl"
+        info["horizons"][f"{h}d"] = {
+            "exists": p.exists(),
+            "size_kb": round(p.stat().st_size / 1024, 1) if p.exists() else 0,
+            "mtime": datetime.fromtimestamp(p.stat().st_mtime).isoformat(timespec="seconds") if p.exists() else None,
+        }
 
-    (models_dir / FEATURE_FILE).write_text(json.dumps(names, ensure_ascii=False, indent=2))
-    (models_dir / METRICS_FILE).write_text(json.dumps(all_metrics, ensure_ascii=False, indent=2))
-    (models_dir / BACKEND_FILE).write_text(
-        json.dumps({"backend": "xgboost" if HAS_XGBOOST else "ridge"}, indent=2)
+    try:
+        data = load_daily_arrays()
+        info["daily_samples"] = len(data.get("tala", [])) if data else 0
+    except Exception:
+        pass
+
+    last_pred = models_dir / LAST_PREDICT_FILE
+    if last_pred.exists():
+        try:
+            info["last_prediction"] = json.loads(last_pred.read_text())
+        except Exception:
+            info["last_prediction"] = None
+    else:
+        info["last_prediction"] = None
+
+    return info
+
+
+def save_last_prediction(prediction: dict, models_dir: Path | str = DEFAULT_MODELS_DIR):
+    models_dir = Path(models_dir)
+    models_dir.mkdir(parents=True, exist_ok=True)
+    from datetime import datetime, timezone
+
+    payload = {
+        "saved_at": datetime.now(timezone.utc).isoformat(),
+        **{k: prediction.get(k) for k in (
+            "model_ready", "price_now", "pred_1d", "pred_7d", "pred_30d",
+            "expected_return_1d", "expected_return_7d", "expected_return_30d", "error",
+        )},
+    }
+    (models_dir / LAST_PREDICT_FILE).write_text(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def train_and_save(
+    db_path: str = DEFAULT_DB,
+    models_dir: Path | str = DEFAULT_MODELS_DIR,
+    triggered_by: str = "cli",
+) -> dict:
+    from datetime import datetime, timezone
+
+    models_dir = Path(models_dir)
+    models_dir.mkdir(parents=True, exist_ok=True)
+    started = datetime.now(timezone.utc)
+    _write_status(
+        models_dir,
+        state="running",
+        triggered_by=triggered_by,
+        started_at=started.isoformat(),
+        message="Training in progress",
     )
-    return all_metrics
+
+    try:
+        data = load_daily_arrays(db_path)
+        if not data:
+            raise RuntimeError("No price history available for training")
+
+        X, names, targets = build_feature_matrix(data)
+        all_metrics: dict[str, Any] = {}
+        for h in HORIZONS:
+            model, metrics = _train_one(X, targets[h])
+            with open(models_dir / f"model_{h}d.pkl", "wb") as f:
+                pickle.dump(model, f)
+            all_metrics[f"{h}d"] = metrics
+            logger.info("Trained model_%sd: %s", h, metrics)
+
+        finished = datetime.now(timezone.utc)
+        duration_sec = (finished - started).total_seconds()
+        all_metrics["_meta"] = {
+            "trained_at": finished.isoformat(),
+            "duration_sec": duration_sec,
+            "triggered_by": triggered_by,
+            "daily_samples": int(len(data["tala"])),
+            "feature_count": len(names),
+            "backend": "xgboost" if HAS_XGBOOST else "ridge",
+        }
+
+        (models_dir / FEATURE_FILE).write_text(json.dumps(names, ensure_ascii=False, indent=2))
+        (models_dir / METRICS_FILE).write_text(json.dumps(all_metrics, ensure_ascii=False, indent=2))
+        (models_dir / BACKEND_FILE).write_text(
+            json.dumps({"backend": "xgboost" if HAS_XGBOOST else "ridge"}, indent=2)
+        )
+
+        history_entry = {
+            "trained_at": finished.isoformat(),
+            "duration_sec": duration_sec,
+            "triggered_by": triggered_by,
+            "success": True,
+            "metrics": {k: v for k, v in all_metrics.items() if k != "_meta"},
+            "meta": all_metrics["_meta"],
+        }
+        append_training_history(history_entry, models_dir)
+        _write_status(
+            models_dir,
+            state="idle",
+            last_success_at=finished.isoformat(),
+            last_duration_sec=duration_sec,
+            triggered_by=triggered_by,
+            message="Last training succeeded",
+        )
+        return all_metrics
+    except Exception as e:
+        finished = datetime.now(timezone.utc)
+        append_training_history(
+            {
+                "trained_at": finished.isoformat(),
+                "duration_sec": (finished - started).total_seconds(),
+                "triggered_by": triggered_by,
+                "success": False,
+                "error": str(e),
+            },
+            models_dir,
+        )
+        _write_status(
+            models_dir,
+            state="error",
+            last_error_at=finished.isoformat(),
+            triggered_by=triggered_by,
+            message=str(e),
+        )
+        raise
 
 
 def backtest_summary(models_dir: Path | str = DEFAULT_MODELS_DIR) -> dict:
     path = Path(models_dir) / METRICS_FILE
     if not path.exists():
         return {}
+    data = json.loads(path.read_text())
+    # Strip meta for callers that only want horizons
+    return {k: v for k, v in data.items() if k != "_meta"}
+
+
+def backtest_summary_full(models_dir: Path | str = DEFAULT_MODELS_DIR) -> dict:
+    path = Path(models_dir) / METRICS_FILE
+    if not path.exists():
+        return {}
     return json.loads(path.read_text())
+
+
+def clear_models(models_dir: Path | str = DEFAULT_MODELS_DIR) -> list[str]:
+    """Delete model artifacts (keeps history/status). Returns deleted filenames."""
+    models_dir = Path(models_dir)
+    deleted = []
+    for name in (
+        *[f"model_{h}d.pkl" for h in HORIZONS],
+        FEATURE_FILE,
+        METRICS_FILE,
+        BACKEND_FILE,
+        LAST_PREDICT_FILE,
+    ):
+        p = models_dir / name
+        if p.exists():
+            p.unlink()
+            deleted.append(name)
+    _write_status(models_dir, state="idle", message="Models cleared by admin")
+    return deleted
 
 
 def _load_models(models_dir: Path):
@@ -372,6 +583,10 @@ def predict_future(
             "error": None,
         }
         result["expected_return"] = result["expected_return_7d"]
+        try:
+            save_last_prediction(result, models_dir)
+        except Exception:
+            logger.debug("Could not persist last prediction", exc_info=True)
         return result
     except Exception as e:
         logger.exception("predict_future failed")

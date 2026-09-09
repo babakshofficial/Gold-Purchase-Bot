@@ -119,7 +119,7 @@ The admin panel (accessed via `/admin`) offers:
 ## Project Structure
 
 *   `main.py`: Bot handlers, DB, jobs, charts UI.
-*   `predictor.py` / `train_models.py` / `train_service.py`: Multi-horizon models + periodic retrain service.
+*   `predictor.py` / `train_models.py` / `train_service.py`: Multi-horizon models + periodic retrain service. Admin panel → **مدیریت مدل** for metrics, history, retrain, clear.
 *   `goal_engine.py`: Goal/risk → BUY/HOLD/SELL.
 *   `advisor.py`: OpenRouter Persian advice.
 *   `messages.py` / `plotting.py` / `crypto_fetch.py` / `crawler.py`.
