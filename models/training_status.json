@@ -1,8 +1,8 @@
 {
-  "updated_at": "2026-09-09T10:07:01.675048+00:00",
+  "updated_at": "2026-09-09T10:33:59.783316+00:00",
   "state": "idle",
-  "last_success_at": "2026-09-09T10:07:01.673877+00:00",
-  "last_duration_sec": 0.608071,
-  "triggered_by": "train_models_cli",
+  "last_success_at": "2026-09-09T10:33:59.781554+00:00",
+  "last_duration_sec": 0.360504,
+  "triggered_by": "admin_full_db",
   "message": "Last training succeeded"
 }
