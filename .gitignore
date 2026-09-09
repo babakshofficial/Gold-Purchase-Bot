@@ -6,3 +6,7 @@ venv
 *test*
 *.pyc
 *.log
+*.claude
+*.cursor
+*graphify-out
+CLAUDE.md
