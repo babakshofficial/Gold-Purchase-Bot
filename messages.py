@@ -43,6 +43,7 @@ BTN_THRESHOLD_SELL = "🔴 آستانه فروش"
 BTN_THRESHOLD_MOVE = "📊 آستانه حرکت قیمت"
 
 # Admin buttons
+BTN_ADMIN_PANEL = "👑 پنل مدیریت"
 BTN_ADMIN_STATS = "📊 آمار کلی"
 BTN_ADMIN_USERS = "👥 آمار کاربران"
 BTN_ADMIN_PRICES = "💰 آمار قیمت‌ها"
@@ -776,6 +777,8 @@ def model_metrics_message(metrics: dict) -> str:
 
 
 def admin_ml_status_message(info: dict) -> str:
+    from time_utils import format_shamsi
+
     ready = "✅ آماده" if info.get("ready") else "❌ آماده نیست"
     status = info.get("status") or {}
     state = status.get("state", "unknown")
@@ -791,13 +794,14 @@ def admin_ml_status_message(info: dict) -> str:
         f"وضعیت آموزش: {state_fa}",
         f"موتور: `{info.get('backend', '?')}`",
         f"تعداد ویژگی: {info.get('feature_count', 0)}",
-        f"نمونه‌های روزانه: {info.get('daily_samples', 0)}",
-        f"آخرین آموزش فایل: {info.get('trained_at') or '—'}",
+        f"نمونه‌های قیمت: {info.get('row_samples', info.get('daily_samples', 0)):,}",
+        f"روزهای پوشش: {info.get('daily_samples', 0)}",
+        f"آخرین آموزش فایل: {format_shamsi(info.get('trained_at')) if info.get('trained_at') else '—'}",
     ]
     if status.get("message"):
         lines.append(f"پیام: {status['message']}")
     if status.get("last_success_at"):
-        lines.append(f"آخرین موفقیت: {status['last_success_at']}")
+        lines.append(f"آخرین موفقیت: {format_shamsi(status['last_success_at'])}")
     if status.get("last_duration_sec") is not None:
         lines.append(f"مدت آخرین آموزش: {status['last_duration_sec']:.1f}s")
     if status.get("triggered_by"):
@@ -806,9 +810,10 @@ def admin_ml_status_message(info: dict) -> str:
     lines.append("\n**فایل‌های افق:**")
     for hor, meta in (info.get("horizons") or {}).items():
         mark = "✅" if meta.get("exists") else "❌"
+        mtime = format_shamsi(meta["mtime"]) if meta.get("mtime") else None
         lines.append(
             f"{mark} {hor}: {meta.get('size_kb', 0)} KB"
-            + (f" | {meta.get('mtime')}" if meta.get("mtime") else "")
+            + (f" | {mtime}" if mtime else "")
         )
 
     last = info.get("last_prediction")
@@ -821,18 +826,21 @@ def admin_ml_status_message(info: dict) -> str:
             f"۳۰ر {last.get('expected_return_30d', 0):+.2f}%"
         )
         if last.get("saved_at"):
-            lines.append(f"زمان: {last['saved_at']}")
+            lines.append(f"زمان: {format_shamsi(last['saved_at'])}")
     return "\n".join(lines)
 
 
 def admin_ml_history_message(entries: list) -> str:
+    from time_utils import format_shamsi
+
     if not entries:
         return "📜 هنوز تاریخچه آموزشی ثبت نشده است."
     lines = ["📜 **تاریخچه آموزش (جدیدترین‌ها)**\n"]
     for i, e in enumerate(entries, 1):
         ok = "✅" if e.get("success") else "❌"
+        trained = format_shamsi(e.get("trained_at")) if e.get("trained_at") else "?"
         lines.append(
-            f"{i}. {ok} {e.get('trained_at', '?')}\n"
+            f"{i}. {ok} {trained}\n"
             f"   منبع: `{e.get('triggered_by', '?')}` | مدت: {e.get('duration_sec', 0):.1f}s"
         )
         if e.get("success") and e.get("metrics"):

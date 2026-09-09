@@ -89,33 +89,123 @@ def _fetch_rows(db_path: str) -> list[tuple]:
         conn.close()
 
 
-def load_daily_arrays(db_path: str = DEFAULT_DB) -> dict[str, np.ndarray]:
-    """Resample intraday rows to daily last close; return parallel numpy arrays."""
+def _parse_ts(value: str):
+    from datetime import datetime as dt
+
+    text = str(value).strip().replace("Z", "+00:00")
+    try:
+        return dt.fromisoformat(text)
+    except ValueError:
+        return dt.strptime(text[:19], "%Y-%m-%d %H:%M:%S")
+
+
+def load_daily_bars(db_path: str = DEFAULT_DB) -> dict[str, np.ndarray]:
+    """Build daily OHLC bars from every price_history row (all sources).
+
+    Uses the full DB: open/high/low/close + tick count + intraday range from
+    all intraday snapshots, then trains day-ahead horizons on those bars.
+    """
     rows = _fetch_rows(db_path)
     if not rows:
         return {}
 
-    crawler = [r for r in rows if r[6] == "crawler"]
-    if len(crawler) >= 200:
-        rows = crawler
-
-    by_day: dict[str, tuple] = {}
+    by_day: dict[str, dict[str, float]] = {}
     for ts, tala, usd, ounce, fair, diff, _src in rows:
         day = str(ts)[:10]
-        by_day[day] = (tala, usd, ounce, fair or 0.0, diff or 0.0)
+        tala_f = float(tala)
+        usd_f = float(usd)
+        ounce_f = float(ounce)
+        fair_f = float(fair or 0.0)
+        diff_f = float(diff or 0.0)
+        if day not in by_day:
+            by_day[day] = {
+                "open": tala_f,
+                "high": tala_f,
+                "low": tala_f,
+                "close": tala_f,
+                "usd": usd_f,
+                "ounce": ounce_f,
+                "fair": fair_f,
+                "difference": diff_f,
+                "ticks": 1.0,
+            }
+        else:
+            bar = by_day[day]
+            bar["high"] = max(bar["high"], tala_f)
+            bar["low"] = min(bar["low"], tala_f)
+            bar["close"] = tala_f
+            bar["usd"] = usd_f
+            bar["ounce"] = ounce_f
+            bar["fair"] = fair_f
+            bar["difference"] = diff_f
+            bar["ticks"] += 1.0
 
     days = sorted(by_day.keys())
-    tala = np.array([by_day[d][0] for d in days], dtype=float)
-    usd = np.array([by_day[d][1] for d in days], dtype=float)
-    ounce = np.array([by_day[d][2] for d in days], dtype=float)
-    fair = np.array([by_day[d][3] for d in days], dtype=float)
-    diff = np.array([by_day[d][4] for d in days], dtype=float)
-    # ordinal day index for dow
+    open_ = np.array([by_day[d]["open"] for d in days], dtype=float)
+    high = np.array([by_day[d]["high"] for d in days], dtype=float)
+    low = np.array([by_day[d]["low"] for d in days], dtype=float)
+    close = np.array([by_day[d]["close"] for d in days], dtype=float)
+    usd = np.array([by_day[d]["usd"] for d in days], dtype=float)
+    ounce = np.array([by_day[d]["ounce"] for d in days], dtype=float)
+    fair = np.array([by_day[d]["fair"] for d in days], dtype=float)
+    diff = np.array([by_day[d]["difference"] for d in days], dtype=float)
+    ticks = np.array([by_day[d]["ticks"] for d in days], dtype=float)
+    range_pct = (high - low) / np.where(close == 0, np.nan, close)
+    intraday_ret = (close - open_) / np.where(open_ == 0, np.nan, open_)
+
     from datetime import datetime as dt
 
     dow = np.array([dt.strptime(d, "%Y-%m-%d").weekday() for d in days], dtype=float)
     return {
         "days": np.array(days),
+        "tala": close,  # close is the main price series
+        "open": open_,
+        "high": high,
+        "low": low,
+        "usd": usd,
+        "ounce": ounce,
+        "fair": fair,
+        "difference": diff,
+        "ticks": ticks,
+        "range_pct": range_pct,
+        "intraday_ret": intraday_ret,
+        "dow": dow,
+    }
+
+
+def load_daily_arrays(db_path: str = DEFAULT_DB) -> dict[str, np.ndarray]:
+    """Daily last-close series from all sources (charts / history tail)."""
+    bars = load_daily_bars(db_path)
+    if not bars:
+        return {}
+    return {
+        "days": bars["days"],
+        "tala": bars["tala"],
+        "usd": bars["usd"],
+        "ounce": bars["ounce"],
+        "fair": bars["fair"],
+        "difference": bars["difference"],
+        "dow": bars["dow"],
+    }
+
+
+def load_series_arrays(db_path: str = DEFAULT_DB) -> dict[str, np.ndarray]:
+    """Raw intraday rows (debug / compatibility). Prefer load_daily_bars for ML."""
+    rows = _fetch_rows(db_path)
+    if not rows:
+        return {}
+
+    timestamps = [_parse_ts(r[0]) for r in rows]
+    tala = np.array([r[1] for r in rows], dtype=float)
+    usd = np.array([r[2] for r in rows], dtype=float)
+    ounce = np.array([r[3] for r in rows], dtype=float)
+    fair = np.array([r[4] or 0.0 for r in rows], dtype=float)
+    diff = np.array([r[5] or 0.0 for r in rows], dtype=float)
+    dow = np.array([t.weekday() for t in timestamps], dtype=float)
+    days = np.array([t.strftime("%Y-%m-%d") for t in timestamps])
+    return {
+        "timestamps": np.array(timestamps, dtype=object),
+        "days": days,
         "tala": tala,
         "usd": usd,
         "ounce": ounce,
@@ -166,10 +256,11 @@ def _rsi(arr: np.ndarray, period: int = 14) -> np.ndarray:
 
 
 FEATURE_NAMES = []
+TARGET_MODE = "return"  # models predict fractional returns; inference converts to price
 
 
 def build_feature_matrix(data: dict[str, np.ndarray]) -> tuple[np.ndarray, list[str], dict[str, np.ndarray]]:
-    """Return X (n, f), feature names, and target dict y_1d/y_7d/y_30d."""
+    """Return X (n, f), feature names, and horizon return targets y_h."""
     global FEATURE_NAMES
     tala, usd, ounce, diff = data["tala"], data["usd"], data["ounce"], data["difference"]
     cols = []
@@ -177,13 +268,13 @@ def build_feature_matrix(data: dict[str, np.ndarray]) -> tuple[np.ndarray, list[
 
     def add(name, arr):
         names.append(name)
-        cols.append(arr)
+        cols.append(np.asarray(arr, dtype=float))
 
     for series_name, series in (("tala", tala), ("usd", usd), ("ounce", ounce), ("difference", diff)):
         add(series_name, series)
-        for lag in (1, 2, 3, 7):
+        for lag in (1, 2, 3, 7, 14):
             add(f"{series_name}_lag{lag}", _lag(series, lag))
-        for win in (7, 14):
+        for win in (7, 14, 30):
             add(f"{series_name}_ma{win}", _rolling_mean(series, win))
             add(f"{series_name}_std{win}", _rolling_std(series, win))
 
@@ -196,13 +287,34 @@ def build_feature_matrix(data: dict[str, np.ndarray]) -> tuple[np.ndarray, list[
     add("rsi_14", _rsi(tala, 14))
     add("dow", data["dow"])
 
+    # Full-DB intraday aggregates when daily bars are available
+    if "range_pct" in data:
+        add("range_pct", data["range_pct"])
+        add("range_pct_ma7", _rolling_mean(data["range_pct"], 7))
+    if "intraday_ret" in data:
+        add("intraday_ret", data["intraday_ret"])
+        add("intraday_ret_ma7", _rolling_mean(data["intraday_ret"], 7))
+    if "ticks" in data:
+        add("ticks", data["ticks"])
+        add("ticks_ma7", _rolling_mean(data["ticks"], 7))
+
+    # Distance from moving averages (trend position)
+    ma7 = _rolling_mean(tala, 7)
+    ma14 = _rolling_mean(tala, 14)
+    add("tala_vs_ma7", (tala - ma7) / np.where(ma7 == 0, np.nan, ma7))
+    add("tala_vs_ma14", (tala - ma14) / np.where(ma14 == 0, np.nan, ma14))
+
     X = np.column_stack(cols)
     FEATURE_NAMES = names
-    targets = {}
+
+    # Horizon targets as fractional returns (stable vs absolute price level)
+    targets: dict[int, np.ndarray] = {}
     for h in HORIZONS:
         y = np.full_like(tala, np.nan)
         if h < len(tala):
-            y[:-h] = tala[h:]
+            future = tala[h:]
+            base = tala[:-h]
+            y[:-h] = (future - base) / np.where(base == 0, np.nan, base)
         targets[h] = y
     return X, names, targets
 
@@ -210,11 +322,13 @@ def build_feature_matrix(data: dict[str, np.ndarray]) -> tuple[np.ndarray, list[
 def _make_model():
     if HAS_XGBOOST:
         return XGBRegressor(
-            n_estimators=200,
-            max_depth=4,
+            n_estimators=250,
+            max_depth=3,
             learning_rate=0.05,
-            subsample=0.9,
-            colsample_bytree=0.9,
+            subsample=0.85,
+            colsample_bytree=0.85,
+            min_child_weight=4,
+            reg_lambda=2.0,
             objective="reg:squarederror",
             n_jobs=2,
             random_state=42,
@@ -239,15 +353,31 @@ def _train_one(X: np.ndarray, y: np.ndarray) -> tuple[Any, dict]:
         "n_train": float(len(X_train)),
         "n_test": float(len(X_test)),
         "backend": "xgboost" if HAS_XGBOOST else "ridge",
+        "target": TARGET_MODE,
     }
     if len(X_test) > 0:
         pred = np.asarray(model.predict(X_test), dtype=float)
+        # Metrics in return space; also report MAE in % points
         mae = float(np.mean(np.abs(pred - y_test)))
-        denom = np.where(y_test == 0, np.nan, y_test)
-        mape = float(np.nanmean(np.abs((pred - y_test) / denom)) * 100)
-        metrics["mae"] = mae
-        metrics["mape"] = mape
+        metrics["mae_return"] = mae
+        metrics["mae"] = mae * 100.0  # percentage points for admin display
+        metrics["mape"] = mae * 100.0
+        # Directional accuracy (up/down)
+        metrics["dir_acc"] = float(np.mean(np.sign(pred) == np.sign(y_test)) * 100)
     return model, metrics
+
+
+def _sanitize_return(pred_ret: float, horizon: int, recent_rets: np.ndarray) -> float:
+    """Clamp extreme forecasts using recent realized volatility."""
+    valid = recent_rets[np.isfinite(recent_rets)]
+    if len(valid) < 5:
+        cap = {1: 0.08, 7: 0.20, 30: 0.35}.get(horizon, 0.15)
+    else:
+        vol = float(np.std(valid))
+        # Scale vol roughly with sqrt(horizon) for multi-day
+        scale = max(1.0, float(np.sqrt(horizon)))
+        cap = max(0.03 * scale, min(0.50, 3.5 * vol * scale))
+    return float(np.clip(pred_ret, -cap, cap))
 
 
 def _write_status(models_dir: Path, **fields):
@@ -334,10 +464,13 @@ def model_artifact_info(models_dir: Path | str = DEFAULT_MODELS_DIR) -> dict:
         }
 
     try:
-        data = load_daily_arrays()
-        info["daily_samples"] = len(data.get("tala", [])) if data else 0
+        rows = _fetch_rows()
+        info["row_samples"] = len(rows)
+        daily = load_daily_bars()
+        info["daily_samples"] = len(daily.get("tala", [])) if daily else 0
     except Exception:
-        pass
+        info["row_samples"] = 0
+        info["daily_samples"] = 0
 
     last_pred = models_dir / LAST_PREDICT_FILE
     if last_pred.exists():
@@ -385,9 +518,12 @@ def train_and_save(
     )
 
     try:
-        data = load_daily_arrays(db_path)
+        data = load_daily_bars(db_path)
         if not data:
             raise RuntimeError("No price history available for training")
+
+        # Count raw rows so admin UI shows full-DB usage
+        row_samples = len(_fetch_rows(db_path))
 
         X, names, targets = build_feature_matrix(data)
         all_metrics: dict[str, Any] = {}
@@ -404,15 +540,23 @@ def train_and_save(
             "trained_at": finished.isoformat(),
             "duration_sec": duration_sec,
             "triggered_by": triggered_by,
+            "row_samples": int(row_samples),
             "daily_samples": int(len(data["tala"])),
             "feature_count": len(names),
             "backend": "xgboost" if HAS_XGBOOST else "ridge",
+            "target": TARGET_MODE,
         }
 
         (models_dir / FEATURE_FILE).write_text(json.dumps(names, ensure_ascii=False, indent=2))
         (models_dir / METRICS_FILE).write_text(json.dumps(all_metrics, ensure_ascii=False, indent=2))
         (models_dir / BACKEND_FILE).write_text(
-            json.dumps({"backend": "xgboost" if HAS_XGBOOST else "ridge"}, indent=2)
+            json.dumps(
+                {
+                    "backend": "xgboost" if HAS_XGBOOST else "ridge",
+                    "target": TARGET_MODE,
+                },
+                indent=2,
+            )
         )
 
         history_entry = {
@@ -526,13 +670,25 @@ def predict_future(
 
     try:
         models, cols = _load_models(models_dir)
-        data = load_daily_arrays(db_path)
+        target_mode = TARGET_MODE
+        backend_path = models_dir / BACKEND_FILE
+        if backend_path.exists():
+            try:
+                target_mode = json.loads(backend_path.read_text()).get("target", TARGET_MODE)
+            except Exception:
+                pass
+
+        data = load_daily_bars(db_path)
         if not data:
             empty["error"] = "no_history"
             return empty
 
         if live_tala is not None:
             data["tala"][-1] = live_tala
+            if "high" in data:
+                data["high"][-1] = max(float(data["high"][-1]), float(live_tala))
+            if "low" in data:
+                data["low"][-1] = min(float(data["low"][-1]), float(live_tala))
             if live_usd is not None:
                 data["usd"][-1] = live_usd
             if live_ounce is not None:
@@ -567,7 +723,25 @@ def predict_future(
                 return empty
 
         price_now = float(live_tala if live_tala is not None else data["tala"][-1])
-        preds = {h: float(np.asarray(models[h].predict(row)).ravel()[0]) for h in HORIZONS}
+        raw_preds = {h: float(np.asarray(models[h].predict(row)).ravel()[0]) for h in HORIZONS}
+
+        # Recent 1d returns for volatility clamp
+        recent_rets = np.full(len(data["tala"]), np.nan)
+        tala_arr = data["tala"]
+        recent_rets[1:] = (tala_arr[1:] - tala_arr[:-1]) / np.where(tala_arr[:-1] == 0, np.nan, tala_arr[:-1])
+        recent_window = recent_rets[-60:]
+
+        preds: dict[int, float] = {}
+        rets: dict[int, float] = {}
+        for h in HORIZONS:
+            if target_mode == "return":
+                ret = _sanitize_return(raw_preds[h], h, recent_window)
+                rets[h] = ret
+                preds[h] = price_now * (1.0 + ret)
+            else:
+                # Legacy absolute-price models
+                preds[h] = raw_preds[h]
+                rets[h] = (preds[h] - price_now) / price_now if price_now else 0.0
 
         result = {
             "model_ready": True,
@@ -575,9 +749,9 @@ def predict_future(
             "pred_1d": preds[1],
             "pred_7d": preds[7],
             "pred_30d": preds[30],
-            "expected_return_1d": (preds[1] - price_now) / price_now * 100 if price_now else 0,
-            "expected_return_7d": (preds[7] - price_now) / price_now * 100 if price_now else 0,
-            "expected_return_30d": (preds[30] - price_now) / price_now * 100 if price_now else 0,
+            "expected_return_1d": rets[1] * 100,
+            "expected_return_7d": rets[7] * 100,
+            "expected_return_30d": rets[30] * 100,
             "usd_toman": live_usd if live_usd is not None else float(data["usd"][-1]),
             "ounce": live_ounce if live_ounce is not None else float(data["ounce"][-1]),
             "error": None,

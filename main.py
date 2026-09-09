@@ -1605,7 +1605,7 @@ async def show_menu(context: ContextTypes.DEFAULT_TYPE, chat_id: int, menu_id: s
             chat_id,
             main_menu_text(user.id),
             parse_mode="Markdown",
-            reply_markup=main_menu_keyboard(),
+            reply_markup=main_menu_keyboard(user.id),
         )
     elif menu_id == NAV_SETTINGS:
         settings = get_user_settings(user.id)
@@ -1737,7 +1737,7 @@ async def open_menu_from_callback(update: Update, context: ContextTypes.DEFAULT_
     await open_menu_from_query(update.callback_query, context, menu_id)
 
 # ================= INLINE KEYBOARDS =================
-def main_menu_keyboard():
+def main_menu_keyboard(user_id: int | None = None):
     keyboard = [
         [InlineKeyboardButton(msg.BTN_ANALYSIS, callback_data="gold")],
         [InlineKeyboardButton(msg.BTN_ADVISE, callback_data="advise"),
@@ -1750,8 +1750,15 @@ def main_menu_keyboard():
         [InlineKeyboardButton(msg.BTN_HISTORY, callback_data="history_menu"),
          InlineKeyboardButton(msg.BTN_SETTINGS, callback_data="settings")],
         [InlineKeyboardButton(msg.BTN_ABOUT, callback_data="about_us")],
-        [InlineKeyboardButton(msg.BTN_HELP, callback_data="help")]
+        [InlineKeyboardButton(msg.BTN_HELP, callback_data="help")],
     ]
+    if user_id is not None and is_admin(user_id):
+        keyboard.append(
+            [
+                InlineKeyboardButton(msg.BTN_ADMIN_ML, callback_data="admin_ml"),
+                InlineKeyboardButton(msg.BTN_ADMIN_PANEL, callback_data="admin_menu"),
+            ]
+        )
     return InlineKeyboardMarkup(keyboard)
 
 
@@ -1897,7 +1904,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     add_or_update_user(user.id, user.username, user.first_name)
     response = main_menu_text(user.id)
-    await update.message.reply_text(response, parse_mode="Markdown", reply_markup=main_menu_keyboard())
+    await update.message.reply_text(response, parse_mode="Markdown", reply_markup=main_menu_keyboard(user.id))
     await audit_log(context, user.id, user.username, "/start", "Sent welcome message and main menu")
 
 async def gold_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE, query=None):

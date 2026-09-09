@@ -111,10 +111,31 @@ CRYPTO_SYMBOL_LABELS = {
 LBL_CRYPTO_TOMAN = "قیمت تومان"
 
 
-def apply_rtl_xaxis(ax):
-    """Invert x-axis so time flows right-to-left (RTL reading order)."""
+def apply_rtl_xaxis(ax, *, with_time: bool | None = None):
+    """Invert x-axis (RTL) and label ticks with Persian Shamsi dates."""
+    import matplotlib.dates as mdates
+
+    from time_utils import format_shamsi
+
+    show_time = with_time
+    if show_time is None:
+        try:
+            left, right = ax.get_xlim()
+            show_time = abs(right - left) < 2.0  # matplotlib date units = days
+        except Exception:
+            show_time = False
+
+    def _tick(x, _pos=None):
+        try:
+            dt = mdates.num2date(x)
+            label = format_shamsi(dt, with_time=bool(show_time))
+            return persian_digits(label)
+        except Exception:
+            return ""
+
+    ax.xaxis.set_major_formatter(plt.FuncFormatter(_tick))
     ax.invert_xaxis()
-    plt.setp(ax.get_xticklabels(), rotation=-45, ha='left')
+    plt.setp(ax.get_xticklabels(), rotation=-45, ha="left")
 
 
 def persian_legend(ax=None, **kwargs):
