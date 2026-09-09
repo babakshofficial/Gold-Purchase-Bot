@@ -5,7 +5,9 @@ import unittest
 from crypto_fetch import (
     MARKET_POST_MARKER,
     find_market_post,
+    find_cryptopricefeed_post,
     parse_arz247_coin,
+    parse_cryptopricefeed_coin,
     parse_ecogold_usdt,
     parse_toman_value,
 )
@@ -28,6 +30,15 @@ ECOGOLD_POST = """
 🔻طلای 18 عیار: 19,112,000 تومان
 🔻تتر: 186,077 تومان
 🔻اونس طلا: 4,396$
+"""
+
+CRYPTOPRICEFEED_POST = """
+🟢 #BTC: $79,664.00
+🟢 #ETH: $2,520.16
+🟢 #DOGE: $0.091
+🟢 #TON: $1.41
+
+@CryptoPriceFeed
 """
 
 
@@ -72,6 +83,19 @@ class TestCryptoFetch(unittest.TestCase):
 
     def test_missing_symbol_returns_none(self):
         self.assertIsNone(parse_arz247_coin(ARZ247_MARKET_POST, "USDT"))
+
+    def test_parse_cryptopricefeed_btc(self):
+        usd = parse_cryptopricefeed_coin(CRYPTOPRICEFEED_POST, "BTC")
+        self.assertEqual(usd, 79664.0)
+
+    def test_parse_cryptopricefeed_eth(self):
+        usd = parse_cryptopricefeed_coin(CRYPTOPRICEFEED_POST, "ETH")
+        self.assertEqual(usd, 2520.16)
+
+    def test_find_cryptopricefeed_post(self):
+        found = find_cryptopricefeed_post(["noise", CRYPTOPRICEFEED_POST])
+        self.assertIsNotNone(found)
+        self.assertIn("#BTC", found)
 
 
 if __name__ == "__main__":

@@ -267,7 +267,23 @@ def crypto_prices_message(
     if missing:
         lines.append(f"⚠️ داده دریافت نشد: {', '.join(missing)}")
 
-    lines.append("📢 منبع: @arz_247")
+    sources = []
+    for symbol in ("BTC", "ETH", "TRX", "USDT"):
+        entry = prices.get(symbol) or {}
+        src = entry.get("source")
+        if src and src not in sources:
+            sources.append(src)
+    if not sources:
+        sources = ["arz_247"]
+    source_labels = []
+    for src in sources:
+        if src == "CryptoPriceFeed":
+            source_labels.append("@CryptoPriceFeed")
+        elif src == "ecogold_ir":
+            source_labels.append("@ecogold_ir")
+        else:
+            source_labels.append(f"@{src}" if not str(src).startswith("@") else str(src))
+    lines.append("📢 منبع: " + " · ".join(source_labels))
     return "\n".join(lines)
 
 
@@ -678,7 +694,7 @@ def about_message(usd_channel: str, gold_channel: str, crypto_channel: str = "ar
         "**منابع قیمت:**\n"
         f"• دلار آزاد: @{usd_channel}\n"
         f"• طلا، اونس و تتر: @{gold_channel}\n"
-        f"• ارزهای دیجیتال: @{crypto_channel}\n\n"
+        f"• ارزهای دیجیتال: @{crypto_channel} (پشتیبان BTC/ETH: @CryptoPriceFeed)\n\n"
         "**سازنده:** @b4bak"
     )
 

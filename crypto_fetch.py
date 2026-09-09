@@ -13,10 +13,13 @@ logger = logging.getLogger("gold_bot")
 CRYPTO_CHANNEL_USERNAME = "arz_247"
 CRYPTO_CHANNEL_URL = f"https://t.me/s/{CRYPTO_CHANNEL_USERNAME}"
 GOLD_CHANNEL_URL = "https://t.me/s/ecogold_ir"
+CRYPTO_PRICE_FEED_USERNAME = "CryptoPriceFeed"
+CRYPTO_PRICE_FEED_URL = f"https://t.me/s/{CRYPTO_PRICE_FEED_USERNAME}"
 
 STAGE1_SYMBOLS = ("BTC", "ETH", "TRX", "USDT")
 MARKET_POST_MARKER = "ارز منتخب بازار"
 RANDOM_POST_MARKER = "انتخاب تصادفی"
+FEED_FALLBACK_SYMBOLS = ("BTC", "ETH")
 
 REQUEST_TIMEOUT = 30
 MAX_FETCH_ATTEMPTS = 5
@@ -98,6 +101,26 @@ def parse_ecogold_usdt(text: str) -> float | None:
     return float(match.group(1).replace(",", ""))
 
 
+def parse_cryptopricefeed_coin(text: str, symbol: str) -> float | None:
+    """Parse USD price like '🟢 #BTC: $79,664.00' from CryptoPriceFeed."""
+    text = normalize(text)
+    pattern = rf"#\s*{re.escape(symbol)}\s*:\s*\$\s*([\d,.]+)"
+    match = re.search(pattern, text, re.IGNORECASE)
+    if not match:
+        return None
+    return float(match.group(1).replace(",", ""))
+
+
+def find_cryptopricefeed_post(messages: list[str]) -> str | None:
+    """Newest post that contains at least one #BTC / #ETH style quote."""
+    for text in messages:
+        if not text:
+            continue
+        if re.search(r"#\s*(BTC|ETH)\s*:", text, re.IGNORECASE):
+            return text
+    return None
+
+
 def fetch_recent_posts(url: str, limit: int = MESSAGES_TO_SCAN, session: requests.Session | None = None) -> list[str]:
     """Fetch the last N message texts from a Telegram public channel page."""
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -170,10 +193,48 @@ def _fetch_recent_posts_safe(url: str, limit: int, session: requests.Session) ->
         return fetch_recent_posts(url, limit=limit, session=session)
 
 
+def fetch_cryptopricefeed_btc_eth(
+    session: requests.Session | None = None,
+    usd_toman: float | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Fetch BTC/ETH USD prices from @CryptoPriceFeed as fallback."""
+    session = session or requests.Session()
+    messages = _fetch_with_retries(CRYPTO_PRICE_FEED_URL, MESSAGES_TO_SCAN, session)
+    post = find_cryptopricefeed_post(messages)
+    if not post:
+        # Also accept posts that only mention the channel handle
+        for text in messages:
+            if "CryptoPriceFeed" in text or "#BTC" in text.upper() or "#ETH" in text.upper():
+                post = text
+                break
+    if not post:
+        raise RuntimeError("No BTC/ETH quote found in CryptoPriceFeed posts")
+
+    result: dict[str, dict[str, Any]] = {}
+    for symbol in FEED_FALLBACK_SYMBOLS:
+        usd = parse_cryptopricefeed_coin(post, symbol)
+        if usd is None:
+            logger.warning("%s not found in CryptoPriceFeed post", symbol)
+            continue
+        entry: dict[str, Any] = {
+            "usd": usd,
+            "toman": None,
+            "change_24h_pct": None,
+            "source": "CryptoPriceFeed",
+        }
+        if usd_toman and usd_toman > 0:
+            entry["toman"] = usd * usd_toman
+        result[symbol] = entry
+    if not result:
+        raise RuntimeError("CryptoPriceFeed post parsed but BTC/ETH missing")
+    return result
+
+
 def fetch_crypto_prices(usd_toman: float | None = None) -> dict[str, dict[str, Any]]:
     """
     Fetch stage-1 crypto prices.
     Primary: arz_247 market post for BTC/ETH/TRX.
+    Fallback: @CryptoPriceFeed for BTC/ETH when missing from arz_247.
     Fallback: ecogold_ir for USDT when missing from arz_247.
     """
     session = requests.Session()
@@ -183,6 +244,21 @@ def fetch_crypto_prices(usd_toman: float | None = None) -> dict[str, dict[str, A
         prices.update(fetch_arz247_market_prices(session))
     except Exception as e:
         logger.error(f"Failed to fetch arz_247 crypto prices: {e}")
+
+    missing_feed = [s for s in FEED_FALLBACK_SYMBOLS if s not in prices]
+    if missing_feed:
+        try:
+            feed = fetch_cryptopricefeed_btc_eth(session, usd_toman=usd_toman)
+            for symbol in missing_feed:
+                if symbol in feed:
+                    prices[symbol] = feed[symbol]
+                    logger.info(
+                        "Using CryptoPriceFeed fallback for %s: $%s",
+                        symbol,
+                        feed[symbol].get("usd"),
+                    )
+        except Exception as e:
+            logger.warning(f"BTC/ETH fallback from CryptoPriceFeed failed: {e}")
 
     usdt_from_arz = None
     if "USDT" not in prices:
