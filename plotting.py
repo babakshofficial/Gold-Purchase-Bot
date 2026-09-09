@@ -156,3 +156,59 @@ def finalize_chart(fig=None) -> BytesIO:
     buf.seek(0)
     plt.close(fig)
     return buf
+
+
+LBL_PRED_HISTORY = "قیمت تاریخی"
+LBL_PRED_FORECAST = "پیش‌بینی مدل"
+LBL_PRED_TITLE = "پیش‌بینی قیمت طلا"
+
+
+def generate_prediction_chart(history_tail, prediction: dict):
+    """Plot recent daily closes plus 1d/7d/30d forecast markers.
+
+    history_tail: list of (date_str, tala_price) or DataFrame-like with index/tala.
+    """
+    from datetime import datetime as dt, timedelta
+
+    if history_tail is None or len(history_tail) < 2:
+        return None
+
+    # Normalize input (list of tuples vs DataFrame)
+    if hasattr(history_tail, "columns") and "tala" in getattr(history_tail, "columns", []):
+        dates = [d.to_pydatetime() if hasattr(d, "to_pydatetime") else d for d in history_tail.index]
+        prices = [float(x) for x in history_tail["tala"]]
+    else:
+        dates = [dt.strptime(str(d)[:10], "%Y-%m-%d") for d, _ in history_tail]
+        prices = [float(p) for _, p in history_tail]
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.plot(dates, prices, marker="o", linewidth=2, label=fa(LBL_PRED_HISTORY), color="#1976D2")
+
+    last_date = dates[-1]
+    price_now = float(prediction.get("price_now") or prices[-1])
+    forecast_points = [
+        (last_date + timedelta(days=1), float(prediction["pred_1d"]), "۱ر"),
+        (last_date + timedelta(days=7), float(prediction["pred_7d"]), "۷ر"),
+        (last_date + timedelta(days=30), float(prediction["pred_30d"]), "۳۰ر"),
+    ]
+    f_dates = [last_date] + [p[0] for p in forecast_points]
+    f_prices = [price_now] + [p[1] for p in forecast_points]
+    ax.plot(
+        f_dates,
+        f_prices,
+        marker="s",
+        linewidth=2,
+        linestyle="--",
+        color="#FF9800",
+        label=fa(LBL_PRED_FORECAST),
+    )
+    for d, p, label in forecast_points:
+        ax.annotate(fa(label), (d, p), textcoords="offset points", xytext=(0, 8), ha="center", fontsize=8)
+
+    set_persian_xlabel(ax, LBL_TIME)
+    set_persian_ylabel(ax, LBL_PRICE_TOMAN)
+    set_persian_title(ax, LBL_PRED_TITLE)
+    persian_legend(ax)
+    ax.grid(True, alpha=0.3)
+    apply_rtl_xaxis(ax)
+    return finalize_chart(fig)

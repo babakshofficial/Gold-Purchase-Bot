@@ -3,10 +3,12 @@ venv
 .env
 *.db
 *.zip
-*test*
 *.pyc
 *.log
 *.claude
 *.cursor
-*graphify-out
+graphify-out/
 CLAUDE.md
+models/*.pkl
+__pycache__/
+.pytest_cache/

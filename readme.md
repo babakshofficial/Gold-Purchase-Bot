@@ -6,19 +6,12 @@ A Python-based Telegram bot designed to analyze gold prices based on global USD 
 
 *   **Real-time Analysis:** Fetches USD and gold ounce prices from external Telegram channels (e.g., `@ecogold_ir`, `@tgjucurrency`).
 *   **Price Calculation:** Calculates a "fair price" for 18K gold per gram in Toman based on global rates.
-*   **Signal Generation:** Provides clear "Buy", "Wait", or "Sell" signals based on the difference between market and fair prices.
-*   **Customizable Thresholds:** Users can set their own "Buy" and "Sell" threshold values.
-*   **Notification System:** Sends alerts to users when specific conditions (Buy/Sell/Significant Move) are met. (Notifications are checked periodically).
-*   **Price Charts:** Generates and sends price comparison charts (Market vs. Fair Price) for the last 24 hours.
-*   **Price History:** Allows users to view price history for different timeframes (24h, 7d, 30d) via charts.
-*   **Trend Analysis:** Calculates and displays price trends (UPWARD/DOWNWARD/FLAT) and volatility based on recent data (last 6 hours).
-*   **Technical Indicators:** Calculates a simplified Relative Strength Index (RSI).
-*   **User Settings:** Allows users to manage notification preferences and thresholds.
-*   **Portfolio Tracking:** Users can register gold grams plus Toman/USD cash and receive daily value and P/L reports.
-*   **Admin Panel:** Provides administrators with statistics, user management, database tools, and broadcasting capabilities.
-*   **Audit Logging:** Logs user interactions to a private Telegram channel for analysis.
-*   **Crawler Service:** A separate service (`crawler_service.py`) fetches and stores price data with technical indicators every 10 minutes for efficient charting and historical analysis.
-*   **About Us Section:** Provides information about the bot, price sources, and the creator.
+*   **ML Predictions:** XGBoost (or Ridge fallback) models for 1d / 7d / 30d gold price forecasts (`predictor.py`, `train_models.py`).
+*   **Goal Engine:** `/setgoal` stores investment horizon + risk; personalized BUY/HOLD/SELL (`goal_engine.py`).
+*   **LLM Advisor:** `/advise` calls OpenRouter (`google/gemini-2.0-flash-001`) for short Persian advice (`advisor.py`), with offline fallback.
+*   **Portfolio Tracking:** Gold, Toman/USD cash, and BTC/ETH/TRX/USDT with daily P/L.
+*   **Admin Panel:** Statistics, DB tools, exports, broadcast, health (includes model metrics).
+*   **Crawler Service:** `crawler.py` fetches and stores price history about every 10 minutes.
 
 ## Prerequisites
 
@@ -53,7 +46,15 @@ A Python-based Telegram bot designed to analyze gold prices based on global USD 
     BOT_TOKEN=your_telegram_bot_token_here
     PRIVATE_CHANNEL_ID=your_private_channel_id_for_audit_logs
     ADMIN_IDS=comma_separated_list_of_admin_user_ids (e.g., 123456789,987654321)
+    OPENROUTER_API_KEY=your_openrouter_api_key
     ```
+
+5.  **Train prediction models (required for /predict and /advise):**
+    ```bash
+    python train_models.py
+    ```
+    Re-run weekly (cron example): `0 3 * * 0 cd /path/to/gold-bot && .venv/bin/python train_models.py`
+    Optional: `pip install xgboost` for XGBoost; otherwise Ridge fallback is used.
 
 ## Configuration
 
@@ -68,7 +69,7 @@ A Python-based Telegram bot designed to analyze gold prices based on global USD 
 
 1.  **Start the Crawler (in a separate terminal/process):**
     ```bash
-    python crawler_service.py
+    python crawler.py
     ```
     This service should run continuously to collect data.
 
@@ -80,19 +81,17 @@ A Python-based Telegram bot designed to analyze gold prices based on global USD 
 ### Commands
 
 *   `/start`: Initialize the bot and display the main menu.
-*   `/gold`: Perform gold price analysis and show the current signal.
-*   `/chart`: Generate and send a price comparison chart (last 24h).
-*   `/history`: Access the history menu to view charts for different timeframes.
-*   `/settings`: Manage notification preferences and thresholds.
-*   `/calc`: Start the gold calculation conversation (enter amount in Toman).
-*   `/portfolio`: Register and track gold, Toman cash, and USD holdings with daily P/L reports.
-*   `/help`: Show the help menu.
-*   `/about`: Display information about the bot, sources, and creator.
-*   `/admin`: Access the admin panel (admin only).
-*   `/stats`: Show bot statistics (admin only).
-*   `/health`: Perform a health check (admin only).
-*   `/test_audit`: Test audit logging (admin only).
-*   `/broadcast`: Start the broadcast message conversation (admin only).
+*   `/gold`: Live gold analysis (bubble + optional model signal).
+*   `/predict`: Multi-horizon price forecast + chart.
+*   `/setgoal`: Set investment goal and risk profile.
+*   `/advise`: Personalized signal + Persian LLM advice + forecast chart.
+*   `/history`: History menu / charts.
+*   `/settings`: Notifications and numeric thresholds.
+*   `/calc`: Convert Toman to gold grams.
+*   `/portfolio`: Track holdings.
+*   `/crypto`: Crypto prices.
+*   `/help` / `/about`: Help and about.
+*   `/admin`, `/stats`, `/health`: Admin tools.
 
 ### Admin Panel
 
@@ -108,10 +107,12 @@ The admin panel (accessed via `/admin`) offers:
 
 ## Project Structure
 
-*   `main.py`: Main bot logic, commands, user interactions, settings, charting (using DB data), notifications, admin panel.
-*   `crawler_service.py`: Independent script to fetch prices, calculate indicators, and store data in the database.
-*   `requirements.txt`: List of Python dependencies.
-*   `.env`: Environment variables (not included in version control for security).
+*   `main.py`: Bot handlers, DB, jobs, charts UI.
+*   `predictor.py` / `train_models.py`: Multi-horizon price models.
+*   `goal_engine.py`: Goal/risk → BUY/HOLD/SELL.
+*   `advisor.py`: OpenRouter Persian advice.
+*   `messages.py` / `plotting.py` / `crypto_fetch.py` / `crawler.py`.
+*   `models/`: Trained artifacts (`model_1d.pkl`, …, `metrics.json`).
 
 ## Database
 

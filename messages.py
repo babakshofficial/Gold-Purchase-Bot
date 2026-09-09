@@ -6,6 +6,9 @@ from datetime import datetime
 # ================= BUTTON LABELS =================
 
 BTN_ANALYSIS = "📊 تحلیل بازار"
+BTN_ADVISE = "🤖 تحلیل هوشمند"
+BTN_PREDICT = "🔮 پیش‌بینی قیمت"
+BTN_SETGOAL = "🎯 تعیین هدف"
 BTN_CALC = "💰 محاسبه گرم"
 BTN_CHART_GOLD = "📈 نمودار قیمت طلا"
 BTN_CHART_USD = "📈 نمودار دلار"
@@ -638,6 +641,9 @@ def help_message() -> str:
         "**دستورات:**\n"
         "/start — شروع و منوی اصلی\n"
         "/gold — تحلیل بازار طلا\n"
+        "/predict — پیش‌بینی قیمت (۱/۷/۳۰ روز)\n"
+        "/setgoal — تعیین هدف و ریسک‌پذیری\n"
+        "/advise — توصیه هوشمند شخصی‌سازی‌شده\n"
         "/crypto — قیمت ارزهای دیجیتال\n"
         "/portfolio — ثبت و مشاهده دارایی\n"
         "/history — تاریخچه قیمت\n"
@@ -648,6 +654,7 @@ def help_message() -> str:
         "**ویژگی‌ها:**\n"
         "🔔 اعلان خرید/فروش/حرکت قیمت\n"
         "📊 تحلیل لحظه‌ای بازار\n"
+        "🤖 پیش‌بینی مدل + توصیه LLM فارسی\n"
         "🪙 قیمت BTC، ETH، TRX و USDT\n"
         "📈 نمودار روند قیمت (از منو)\n"
         "💼 پیگیری دارایی (طلا، نقد، BTC/ETH/TRX/USDT) و گزارش روزانه\n"
@@ -659,14 +666,88 @@ def help_message() -> str:
 def about_message(usd_channel: str, gold_channel: str, crypto_channel: str = "arz_247") -> str:
     return (
         "ℹ️ **درباره ربات**\n\n"
-        "این ربات قیمت طلای ۱۸ عیار را با ترکیب دلار آزاد و اونس جهانی تحلیل می‌کند "
-        "و قیمت ارزهای دیجیتال منتخب را نیز نمایش می‌دهد.\n\n"
+        "این ربات قیمت طلای ۱۸ عیار را با ترکیب دلار آزاد و اونس جهانی تحلیل می‌کند، "
+        "با مدل یادگیری ماشین قیمت آینده را پیش‌بینی می‌کند و توصیه فارسی ارائه می‌دهد.\n\n"
         "**منابع قیمت:**\n"
         f"• دلار آزاد: @{usd_channel}\n"
         f"• طلا، اونس و تتر: @{gold_channel}\n"
         f"• ارزهای دیجیتال: @{crypto_channel}\n\n"
         "**سازنده:** @b4bak"
     )
+
+
+# ================= ML / ADVISE =================
+
+PREDICT_MODELS_MISSING = (
+    "❌ مدل پیش‌بینی هنوز آموزش ندیده است.\n"
+    "ادمین باید `python train_models.py` را اجرا کند."
+)
+
+SETGOAL_PROMPT_GOAL = "🎯 **هدف سرمایه‌گذاری خود را انتخاب کنید:**"
+SETGOAL_PROMPT_RISK = "⚖️ **میزان ریسک‌پذیری شما:**"
+SETGOAL_NEED_GOAL = (
+    "🎯 ابتدا هدف و ریسک خود را با /setgoal تنظیم کنید، "
+    "سپس دوباره /advise را بزنید."
+)
+
+BTN_GOAL_SHORT = "کوتاه‌مدت (۱-۷ روز)"
+BTN_GOAL_MEDIUM = "میان‌مدت (۱-۳ ماه)"
+BTN_GOAL_LONG = "بلندمدت (۶+ ماه)"
+BTN_GOAL_WEDDING = "پس‌انداز عروسی/طلا"
+BTN_GOAL_INFLATION = "حفظ ارزش در برابر تورم"
+BTN_RISK_CONS = "محافظه‌کار 🛡️"
+BTN_RISK_MED = "متوسط ⚖️"
+BTN_RISK_AGG = "جسورانه 🚀"
+
+
+def setgoal_saved(goal_fa: str, risk_fa: str) -> str:
+    return (
+        "✅ **پروفایل سرمایه‌گذاری ذخیره شد**\n\n"
+        f"🎯 هدف: {goal_fa}\n"
+        f"⚖️ ریسک: {risk_fa}\n\n"
+        "حالا می‌توانید /advise را بزنید."
+    )
+
+
+def predict_message(prediction: dict) -> str:
+    return (
+        "🔮 **پیش‌بینی قیمت طلای ۱۸ عیار**\n\n"
+        f"🏷 قیمت فعلی: {prediction['price_now']:,.0f} تومان\n"
+        f"📅 فردا: {prediction['pred_1d']:,.0f} "
+        f"({prediction['expected_return_1d']:+.2f}%)\n"
+        f"📅 ۷ روز: {prediction['pred_7d']:,.0f} "
+        f"({prediction['expected_return_7d']:+.2f}%)\n"
+        f"📅 ۳۰ روز: {prediction['pred_30d']:,.0f} "
+        f"({prediction['expected_return_30d']:+.2f}%)\n\n"
+        f"💵 دلار: {prediction.get('usd_toman', 0):,.0f} تومان\n"
+        f"🌍 اونس: ${prediction.get('ounce', 0):,.2f}\n\n"
+        "⚠️ پیش‌بینی مدل آماری است و قطعی نیست."
+    )
+
+
+def advise_header(signal_info: dict) -> str:
+    signal_fa = {"BUY": "خرید", "SELL": "فروش", "HOLD": "نگهداری"}.get(
+        signal_info["signal"], signal_info["signal"]
+    )
+    return (
+        f"{signal_info['emoji']} **سیگنال شخصی: {signal_fa}**\n"
+        f"🎯 {signal_info['goal_fa']} | ⚖️ {signal_info['risk_fa']}\n"
+        f"📈 بازده مورد انتظار ({signal_info['horizon']}): "
+        f"{signal_info['expected_return']:+.2f}%\n"
+        f"_{signal_info['reason_fa']}_\n"
+    )
+
+
+def model_metrics_message(metrics: dict) -> str:
+    if not metrics:
+        return "📊 متریک مدل: هنوز آموزشی ثبت نشده."
+    lines = ["📊 **متریک آخرین آموزش مدل**"]
+    for hor, m in metrics.items():
+        lines.append(
+            f"• {hor}: MAE={m.get('mae', 0):,.0f} | "
+            f"MAPE={m.get('mape', 0):.1f}% | backend={m.get('backend', '?')}"
+        )
+    return "\n".join(lines)
 
 
 # ================= ERRORS =================

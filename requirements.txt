@@ -8,3 +8,9 @@ arabic-reshaper
 python-bidi
 python-telegram-bot==21.6
 python-telegram-bot[job-queue]
+httpx
+# Optional (preferred when installable): enables XGBoost instead of Ridge fallback
+# pandas
+# scikit-learn
+# xgboost
+# joblib

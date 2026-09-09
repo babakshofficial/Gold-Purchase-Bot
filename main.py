@@ -59,6 +59,7 @@ from plotting import (
     set_persian_ylabel,
     finalize_chart,
     apply_rtl_xaxis,
+    generate_prediction_chart,
 )
 setup_matplotlib_persian()
 from io import BytesIO
@@ -66,6 +67,9 @@ import numpy as np
 from telegram.helpers import escape_markdown 
 import messages as msg
 from crypto_fetch import fetch_crypto_prices, STAGE1_SYMBOLS, CRYPTO_CHANNEL_USERNAME
+from predictor import predict_future, models_ready, backtest_summary, daily_history_tail
+from goal_engine import compute_signal, GOAL_LABELS_FA, RISK_LABELS_FA, GOALS, RISKS
+from advisor import get_persian_advice
 
 load_dotenv()
 # ================= LOGGING =================
@@ -113,6 +117,8 @@ ASK_PORTFOLIO_BTC = 11
 ASK_PORTFOLIO_ETH = 12
 ASK_PORTFOLIO_TRX = 13
 ASK_PORTFOLIO_USDT = 14
+ASK_SETGOAL_GOAL = 15
+ASK_SETGOAL_RISK = 16
 
 PORTFOLIO_CRYPTO_KEYS = {
     "BTC": "portfolio_btc",
@@ -251,6 +257,8 @@ def _migrate_users_columns(c):
         'ALTER TABLE users ADD COLUMN baseline_total_toman INTEGER DEFAULT NULL',
         'ALTER TABLE users ADD COLUMN baseline_total_usd REAL DEFAULT NULL',
         'ALTER TABLE users ADD COLUMN portfolio_updated_at TIMESTAMP DEFAULT NULL',
+        'ALTER TABLE users ADD COLUMN invest_goal TEXT DEFAULT NULL',
+        'ALTER TABLE users ADD COLUMN risk_profile TEXT DEFAULT NULL',
     ]
     for sql in migrations:
         try:
@@ -305,7 +313,11 @@ def add_or_update_user(user_id, username, first_name):
 def get_user_settings(user_id):
     conn = sqlite3.connect('gold_bot.db')
     c = conn.cursor()
-    c.execute('SELECT notifications, notification_flags, buy_threshold, wait_threshold, significant_move_threshold FROM users WHERE user_id = ?', (user_id,))
+    c.execute(
+        'SELECT notifications, notification_flags, buy_threshold, wait_threshold, '
+        'significant_move_threshold, invest_goal, risk_profile FROM users WHERE user_id = ?',
+        (user_id,),
+    )
     result = c.fetchone()
     conn.close()
     if result:
@@ -314,15 +326,40 @@ def get_user_settings(user_id):
             'notification_flags': result[1],
             'buy_threshold': result[2],
             'wait_threshold': result[3],
-            'significant_move_threshold': result[4]
+            'significant_move_threshold': result[4],
+            'invest_goal': result[5],
+            'risk_profile': result[6],
         }
     return {
         'notifications': 1,
         'notification_flags': DEFAULT_NOTIFICATION_FLAGS,
         'buy_threshold': DEFAULT_BUY_THRESHOLD,
         'wait_threshold': DEFAULT_WAIT_THRESHOLD,
-        'significant_move_threshold': 700000
+        'significant_move_threshold': 700000,
+        'invest_goal': None,
+        'risk_profile': None,
     }
+
+
+def save_user_goal_profile(user_id, invest_goal: str, risk_profile: str):
+    conn = sqlite3.connect('gold_bot.db')
+    c = conn.cursor()
+    c.execute(
+        'UPDATE users SET invest_goal = ?, risk_profile = ? WHERE user_id = ?',
+        (invest_goal, risk_profile, user_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_users_goal_map():
+    conn = sqlite3.connect('gold_bot.db')
+    c = conn.cursor()
+    c.execute('SELECT user_id, invest_goal, risk_profile FROM users')
+    out = {row[0]: (row[1], row[2]) for row in c.fetchall()}
+    conn.close()
+    return out
+
 
 def get_user_portfolio(user_id):
     conn = sqlite3.connect('gold_bot.db')
@@ -1684,6 +1721,9 @@ async def open_menu_from_callback(update: Update, context: ContextTypes.DEFAULT_
 def main_menu_keyboard():
     keyboard = [
         [InlineKeyboardButton(msg.BTN_ANALYSIS, callback_data="gold")],
+        [InlineKeyboardButton(msg.BTN_ADVISE, callback_data="advise"),
+         InlineKeyboardButton(msg.BTN_PREDICT, callback_data="predict")],
+        [InlineKeyboardButton(msg.BTN_SETGOAL, callback_data="setgoal")],
         [InlineKeyboardButton(msg.BTN_CALC, callback_data="calc")],
         [InlineKeyboardButton(msg.BTN_PORTFOLIO, callback_data="portfolio")],
         [InlineKeyboardButton(msg.BTN_CRYPTO, callback_data="crypto_menu")],
@@ -1694,6 +1734,26 @@ def main_menu_keyboard():
         [InlineKeyboardButton(msg.BTN_HELP, callback_data="help")]
     ]
     return InlineKeyboardMarkup(keyboard)
+
+
+def setgoal_goal_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(msg.BTN_GOAL_SHORT, callback_data="goal:short"),
+         InlineKeyboardButton(msg.BTN_GOAL_MEDIUM, callback_data="goal:medium")],
+        [InlineKeyboardButton(msg.BTN_GOAL_LONG, callback_data="goal:long"),
+         InlineKeyboardButton(msg.BTN_GOAL_WEDDING, callback_data="goal:wedding")],
+        [InlineKeyboardButton(msg.BTN_GOAL_INFLATION, callback_data="goal:inflation")],
+        back_row(NAV_MAIN),
+    ])
+
+
+def setgoal_risk_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(msg.BTN_RISK_CONS, callback_data="risk:conservative")],
+        [InlineKeyboardButton(msg.BTN_RISK_MED, callback_data="risk:medium")],
+        [InlineKeyboardButton(msg.BTN_RISK_AGG, callback_data="risk:aggressive")],
+        back_row(NAV_MAIN),
+    ])
 
 def portfolio_keyboard():
     keyboard = [
@@ -1895,6 +1955,19 @@ async def gold_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE, quer
             trend_hours=TREND_HOURS,
         )
 
+        if models_ready():
+            prediction = predict_future(
+                live_tala=tala, live_usd=usd_toman, live_ounce=ounce
+            )
+            if prediction.get("model_ready"):
+                goal = settings.get("invest_goal") or "medium"
+                risk = settings.get("risk_profile") or "medium"
+                signal_info = compute_signal(prediction, goal, risk)
+                response += (
+                    f"\n\n{msg.advise_header(signal_info)}"
+                    "\nبرای توصیه کامل: /advise"
+                )
+
         await processing_msg.edit_text(response, parse_mode="Markdown", reply_markup=kb_back(NAV_MAIN))
 
         try:
@@ -1905,6 +1978,194 @@ async def gold_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE, quer
     except Exception:
         logger.exception("Gold analysis failed")
         await processing_msg.edit_text(msg.ERROR_FETCH, reply_markup=kb_back(NAV_MAIN))
+
+
+async def _send_prediction_bundle(context, chat_id, prediction, caption_extra: str = ""):
+    text = msg.predict_message(prediction)
+    if caption_extra:
+        text = caption_extra + "\n" + text
+    chart = None
+    try:
+        tail = daily_history_tail(days=30)
+        chart = generate_prediction_chart(tail, prediction)
+    except Exception:
+        logger.exception("prediction chart failed")
+    if chart:
+        await context.bot.send_photo(
+            chat_id=chat_id,
+            photo=chart,
+            caption=text[:1024],
+            parse_mode="Markdown",
+            reply_markup=kb_back(NAV_MAIN),
+        )
+        if len(text) > 1024:
+            await context.bot.send_message(
+                chat_id, text[1024:], parse_mode="Markdown", reply_markup=kb_back(NAV_MAIN)
+            )
+    else:
+        await context.bot.send_message(
+            chat_id, text, parse_mode="Markdown", reply_markup=kb_back(NAV_MAIN)
+        )
+
+
+async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE, query=None):
+    user = query.from_user if query else update.effective_user
+    chat_id = query.message.chat_id if query else update.message.chat_id
+    if query:
+        await query.answer()
+        await delete_message_safe(query.message)
+    if not models_ready():
+        await context.bot.send_message(
+            chat_id, msg.PREDICT_MODELS_MISSING, parse_mode="Markdown", reply_markup=kb_back(NAV_MAIN)
+        )
+        return
+    processing = await context.bot.send_message(chat_id, msg.PROCESSING)
+    try:
+        try:
+            tala, ounce = fetch_and_parse_gold()
+            usd = fetch_and_parse_usd()
+        except Exception:
+            tala = ounce = usd = None
+        prediction = predict_future(live_tala=tala, live_usd=usd, live_ounce=ounce)
+        if not prediction.get("model_ready"):
+            await processing.edit_text(msg.PREDICT_MODELS_MISSING, reply_markup=kb_back(NAV_MAIN))
+            return
+        await delete_message_safe(processing)
+        await _send_prediction_bundle(context, chat_id, prediction)
+        await audit_log(context, user.id, user.username, "/predict", "Prediction sent")
+    except Exception:
+        logger.exception("predict_command failed")
+        await processing.edit_text(msg.ERROR_GENERIC, reply_markup=kb_back(NAV_MAIN))
+
+
+async def setgoal_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query:
+        await query.answer()
+        await delete_message_safe(query.message)
+        await context.bot.send_message(
+            query.message.chat_id,
+            msg.SETGOAL_PROMPT_GOAL,
+            parse_mode="Markdown",
+            reply_markup=setgoal_goal_keyboard(),
+        )
+    else:
+        await update.message.reply_text(
+            msg.SETGOAL_PROMPT_GOAL,
+            parse_mode="Markdown",
+            reply_markup=setgoal_goal_keyboard(),
+        )
+    return ASK_SETGOAL_GOAL
+
+
+async def setgoal_pick_goal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    goal = query.data.split(":", 1)[1]
+    if goal not in GOALS:
+        await query.edit_message_text(msg.ERROR_GENERIC, reply_markup=kb_back(NAV_MAIN))
+        return ConversationHandler.END
+    context.user_data["setgoal_goal"] = goal
+    await query.edit_message_text(
+        msg.SETGOAL_PROMPT_RISK,
+        parse_mode="Markdown",
+        reply_markup=setgoal_risk_keyboard(),
+    )
+    return ASK_SETGOAL_RISK
+
+
+async def setgoal_pick_risk(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    risk = query.data.split(":", 1)[1]
+    goal = context.user_data.get("setgoal_goal")
+    if risk not in RISKS or goal not in GOALS:
+        await query.edit_message_text(msg.ERROR_GENERIC, reply_markup=kb_back(NAV_MAIN))
+        return ConversationHandler.END
+    user = query.from_user
+    add_or_update_user(user.id, user.username, user.first_name)
+    save_user_goal_profile(user.id, goal, risk)
+    context.user_data.pop("setgoal_goal", None)
+    await query.edit_message_text(
+        msg.setgoal_saved(GOAL_LABELS_FA[goal], RISK_LABELS_FA[risk]),
+        parse_mode="Markdown",
+        reply_markup=kb_back(NAV_MAIN),
+    )
+    return ConversationHandler.END
+
+
+async def advise_command(update: Update, context: ContextTypes.DEFAULT_TYPE, query=None):
+    user = query.from_user if query else update.effective_user
+    chat_id = query.message.chat_id if query else update.message.chat_id
+    if query:
+        await query.answer()
+        await delete_message_safe(query.message)
+
+    add_or_update_user(user.id, user.username, user.first_name)
+    settings = get_user_settings(user.id)
+    if not settings.get("invest_goal") or not settings.get("risk_profile"):
+        await context.bot.send_message(
+            chat_id, msg.SETGOAL_NEED_GOAL, parse_mode="Markdown", reply_markup=kb_back(NAV_MAIN)
+        )
+        return
+
+    if not models_ready():
+        await context.bot.send_message(
+            chat_id, msg.PREDICT_MODELS_MISSING, parse_mode="Markdown", reply_markup=kb_back(NAV_MAIN)
+        )
+        return
+
+    processing = await context.bot.send_message(chat_id, msg.PROCESSING)
+    try:
+        try:
+            tala, ounce = fetch_and_parse_gold()
+            usd = fetch_and_parse_usd()
+        except Exception:
+            tala = ounce = usd = None
+        prediction = predict_future(live_tala=tala, live_usd=usd, live_ounce=ounce)
+        if not prediction.get("model_ready"):
+            await processing.edit_text(msg.PREDICT_MODELS_MISSING, reply_markup=kb_back(NAV_MAIN))
+            return
+
+        signal_info = compute_signal(
+            prediction, settings["invest_goal"], settings["risk_profile"]
+        )
+        prediction["expected_return"] = signal_info["expected_return"]
+
+        portfolio = get_user_portfolio(user.id)
+        port_snip = None
+        if portfolio:
+            port_snip = {
+                "gold_grams": portfolio.get("gold_grams"),
+                "cash_toman": portfolio.get("cash_toman"),
+                "cash_usd": portfolio.get("cash_usd"),
+            }
+
+        advice = await get_persian_advice(
+            user_goal=signal_info["goal_fa"],
+            user_risk=signal_info["risk_fa"],
+            prediction=prediction,
+            signal=signal_info["signal"],
+            portfolio=port_snip,
+        )
+        header = msg.advise_header(signal_info)
+        full_text = f"{header}\n{advice}\n\n⚠️ مسئولیت تصمیم با شماست."
+
+        await delete_message_safe(processing)
+        await _send_prediction_bundle(context, chat_id, prediction, caption_extra=full_text[:900])
+        if len(full_text) > 900:
+            await context.bot.send_message(
+                chat_id, full_text, parse_mode="Markdown", reply_markup=kb_back(NAV_MAIN)
+            )
+        await audit_log(
+            context, user.id, user.username, "/advise", f"Signal {signal_info['signal']}"
+        )
+    except Exception:
+        logger.exception("advise_command failed")
+        try:
+            await processing.edit_text(msg.ERROR_GENERIC, reply_markup=kb_back(NAV_MAIN))
+        except Exception:
+            await context.bot.send_message(chat_id, msg.ERROR_GENERIC, reply_markup=kb_back(NAV_MAIN))
 
 
 async def show_history_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, query=None):
@@ -2403,6 +2664,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "gold":
         await gold_analysis(update, context, query)
+    elif query.data == "predict":
+        await predict_command(update, context, query)
+    elif query.data == "advise":
+        await advise_command(update, context, query)
     elif query.data == "history_menu":
         await show_history_menu(update, context, query)
     elif query.data.startswith("history_"):
@@ -2947,6 +3212,16 @@ async def admin_health_check(update: Update, context: ContextTypes.DEFAULT_TYPE,
         health_status.append(f"❌ ارز دیجیتال: خطا - {e}")
 
     try:
+        if models_ready():
+            metrics = backtest_summary()
+            health_status.append("✅ مدل پیش‌بینی: آماده")
+            health_status.append(msg.model_metrics_message(metrics))
+        else:
+            health_status.append("⚠️ مدل پیش‌بینی: آموزش ندیده (python train_models.py)")
+    except Exception as e:
+        health_status.append(f"❌ مدل پیش‌بینی: خطا - {e}")
+
+    try:
         if PRIVATE_CHANNEL_ID:
             await context.bot.send_message(chat_id=PRIVATE_CHANNEL_ID, text="🧪 Health Check Ping")
             health_status.append(f"✅ کانال لاگ: قابل دسترسی ({PRIVATE_CHANNEL_ID})")
@@ -3360,6 +3635,10 @@ async def monitor_prices(context: ContextTypes.DEFAULT_TYPE):
 
         logger.info(f"Monitor Prices - Fetched Raw Tala: {tala}, Raw USD (Toman): {usd_toman}, Raw Ounce: {ounce}")
         all_users = get_all_users_with_notifications()
+        goal_map = get_users_goal_map()
+        prediction = None
+        if models_ready():
+            prediction = predict_future(live_tala=tala, live_usd=usd_toman, live_ounce=ounce)
 
         analysis_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -3371,36 +3650,74 @@ async def monitor_prices(context: ContextTypes.DEFAULT_TYPE):
 
             logger.debug(f"Monitor Prices - User {user_id}: Calculated Fair: {fair:.2f}, Diff (Var): {var:.2f}")
 
-            verdict, emoji, status = determine_verdict(var, buy_thresh, wait_thresh)
-            if flags & NOTIF_BUY and var <= -buy_thresh:
-                alert_msg = msg.alert_buy(
-                    analysis_time_str, verdict, int(var), tala, int(fair)
-                )
-                try:
-                    await context.bot.send_message(
-                        chat_id=user_id,
-                        text=alert_msg,
-                        parse_mode="Markdown"
-                    )
-                    logger.info(f"BUY Alert sent to user {user_id}")
-                    await asyncio.sleep(0.05)
-                except Exception as e:
-                    logger.warning(f"Alert send failed for user {user_id}: {e}")
+            invest_goal, risk_profile = goal_map.get(user_id, (None, None))
+            use_ml = (
+                prediction
+                and prediction.get("model_ready")
+                and invest_goal
+                and risk_profile
+            )
 
-            if flags & NOTIF_SELL and var >= wait_thresh:
-                alert_msg = msg.alert_sell(
-                    analysis_time_str, verdict, int(var), tala, int(fair)
-                )
-                try:
-                    await context.bot.send_message(
-                        chat_id=user_id,
-                        text=alert_msg,
-                        parse_mode="Markdown"
+            if use_ml:
+                signal_info = compute_signal(prediction, invest_goal, risk_profile)
+                status = signal_info["signal"]
+                verdict = {
+                    "BUY": msg.verdict_alert_buy(),
+                    "SELL": msg.verdict_alert_sell(),
+                    "HOLD": msg.verdict_alert_wait(),
+                }[status]
+                if flags & NOTIF_BUY and status == "BUY":
+                    alert_msg = msg.alert_buy(
+                        analysis_time_str, verdict, int(var), tala, int(fair)
                     )
-                    logger.info(f"SELL Alert sent to user {user_id}")
-                    await asyncio.sleep(0.05)
-                except Exception as e:
-                    logger.warning(f"Alert send failed for user {user_id}: {e}")
+                    try:
+                        await context.bot.send_message(
+                            chat_id=user_id, text=alert_msg, parse_mode="Markdown"
+                        )
+                        logger.info(f"BUY Alert (ML) sent to user {user_id}")
+                        await asyncio.sleep(0.05)
+                    except Exception as e:
+                        logger.warning(f"Alert send failed for user {user_id}: {e}")
+
+                if flags & NOTIF_SELL and status == "SELL":
+                    alert_msg = msg.alert_sell(
+                        analysis_time_str, verdict, int(var), tala, int(fair)
+                    )
+                    try:
+                        await context.bot.send_message(
+                            chat_id=user_id, text=alert_msg, parse_mode="Markdown"
+                        )
+                        logger.info(f"SELL Alert (ML) sent to user {user_id}")
+                        await asyncio.sleep(0.05)
+                    except Exception as e:
+                        logger.warning(f"Alert send failed for user {user_id}: {e}")
+            else:
+                verdict, emoji, status = determine_verdict(var, buy_thresh, wait_thresh)
+                if flags & NOTIF_BUY and var <= -buy_thresh:
+                    alert_msg = msg.alert_buy(
+                        analysis_time_str, verdict, int(var), tala, int(fair)
+                    )
+                    try:
+                        await context.bot.send_message(
+                            chat_id=user_id, text=alert_msg, parse_mode="Markdown"
+                        )
+                        logger.info(f"BUY Alert sent to user {user_id}")
+                        await asyncio.sleep(0.05)
+                    except Exception as e:
+                        logger.warning(f"Alert send failed for user {user_id}: {e}")
+
+                if flags & NOTIF_SELL and var >= wait_thresh:
+                    alert_msg = msg.alert_sell(
+                        analysis_time_str, verdict, int(var), tala, int(fair)
+                    )
+                    try:
+                        await context.bot.send_message(
+                            chat_id=user_id, text=alert_msg, parse_mode="Markdown"
+                        )
+                        logger.info(f"SELL Alert sent to user {user_id}")
+                        await asyncio.sleep(0.05)
+                    except Exception as e:
+                        logger.warning(f"Alert send failed for user {user_id}: {e}")
 
             if flags & NOTIF_SIGNIFICANT_MOVE:
                 if abs(var) > sig_move_thresh and var > 0:
@@ -3439,11 +3756,32 @@ def main():
     # Regular commands
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("gold", lambda u, c: gold_analysis(u, c)))
+    app.add_handler(CommandHandler("predict", lambda u, c: predict_command(u, c)))
+    app.add_handler(CommandHandler("advise", lambda u, c: advise_command(u, c)))
     app.add_handler(CommandHandler("history", lambda u, c: show_history_menu(u, c)))
     app.add_handler(CommandHandler("settings", lambda u, c: settings_menu(u, c)))
     app.add_handler(CommandHandler("help", lambda u, c: help_menu(u, c)))
     app.add_handler(CommandHandler("about", lambda u, c: about_us(u, c)))
     app.add_handler(CommandHandler("crypto", lambda u, c: crypto_menu(u, c)))
+
+    setgoal_conv_handler = ConversationHandler(
+        entry_points=[
+            CommandHandler("setgoal", setgoal_start),
+            CallbackQueryHandler(setgoal_start, pattern="^setgoal$"),
+        ],
+        states={
+            ASK_SETGOAL_GOAL: [
+                CallbackQueryHandler(setgoal_pick_goal, pattern="^goal:"),
+                CallbackQueryHandler(handle_nav_back, pattern="^nav_back:"),
+            ],
+            ASK_SETGOAL_RISK: [
+                CallbackQueryHandler(setgoal_pick_risk, pattern="^risk:"),
+                CallbackQueryHandler(handle_nav_back, pattern="^nav_back:"),
+            ],
+        },
+        fallbacks=[CallbackQueryHandler(handle_nav_back, pattern="^nav_back:")],
+    )
+    app.add_handler(setgoal_conv_handler)
 
     portfolio_conv_handler = ConversationHandler(
         entry_points=[
