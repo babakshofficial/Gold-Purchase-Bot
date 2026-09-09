@@ -1,12 +1,12 @@
 {
-  "saved_at": "2026-09-09T08:57:03.313388+00:00",
+  "saved_at": "2026-09-09T09:07:12.949492+00:00",
   "model_ready": true,
   "price_now": 24027000.0,
-  "pred_1d": 19694100.0,
+  "pred_1d": 19498050.0,
   "pred_7d": 20350306.0,
-  "pred_30d": 18613232.0,
-  "expected_return_1d": -18.033462354850794,
+  "pred_30d": 18675068.0,
+  "expected_return_1d": -18.84941940317143,
   "expected_return_7d": -15.302343197236443,
-  "expected_return_30d": -22.532018146252135,
+  "expected_return_30d": -22.274657676780286,
   "error": null
 }
