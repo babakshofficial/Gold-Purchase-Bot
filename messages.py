@@ -59,6 +59,9 @@ BTN_ADMIN_ML_HISTORY = "📜 تاریخچه آموزش"
 BTN_ADMIN_ML_PREDICT = "🔮 تست پیش‌بینی"
 BTN_ADMIN_ML_TRAIN = "▶️ آموزش مجدد"
 BTN_ADMIN_ML_CLEAR = "🗑 پاک کردن مدل‌ها"
+BTN_CHANGELOG_SEND = "✅ ارسال برای همه"
+BTN_CHANGELOG_REGEN = "🔄 تولید دوباره"
+BTN_CHANGELOG_SKIP = "⏭ رد کردن"
 
 
 # ================= WELCOME =================
@@ -894,6 +897,33 @@ ADMIN_FILE_SENT = "✅ فایل ارسال شد"
 ADMIN_BROADCAST_MENU = "📢 **ارسال پیام همگانی**\nنوع ارسال را انتخاب کنید:"
 ADMIN_BROADCAST_PROMPT = "📢 پیام خود را برای ارسال به همه کاربران وارد کنید:"
 
+CHANGELOG_USER_HEADER = "📢 **به‌روزرسانی ربات**\n\n"
+CHANGELOG_SKIPPED = "⏭ ارسال changelog رد شد. تا تغییر بعدی دوباره نمی‌پرسم."
+CHANGELOG_SENDING = "⏳ در حال ارسال changelog برای همه کاربران…"
+CHANGELOG_NO_DRAFT = "❌ متن changelog موجود نیست. دوباره تولید کنید."
+CHANGELOG_REGENERATING = "⏳ در حال تولید دوباره متن…"
+
+
+def changelog_admin_prompt(draft: str) -> str:
+    return (
+        "🆕 **نسخه جدید آماده است**\n\n"
+        "متن پیشنهادی changelog:\n"
+        f"{draft}\n\n"
+        "ارسال برای همه کاربران؟"
+    )
+
+
+def changelog_broadcast_body(draft: str) -> str:
+    return f"{CHANGELOG_USER_HEADER}{draft}"
+
+
+def admin_broadcast_result(success: int, failed: int) -> str:
+    return (
+        f"✅ پیام ارسال شد\n"
+        f"موفق: {success}\n"
+        f"ناموفق: {failed}"
+    )
+
 
 def admin_stats_message(
     user_count: int,
@@ -935,7 +965,3 @@ def admin_users_message(
 
 def admin_health_check(status_lines: list[str]) -> str:
     return "🔍 **چک سلامت ربات**\n\n" + "\n".join(status_lines)
-
-
-def admin_broadcast_result(success: int, failed: int) -> str:
-    return f"✅ پیام ارسال شد\nموفق: {success}\nناموفق: {failed}"

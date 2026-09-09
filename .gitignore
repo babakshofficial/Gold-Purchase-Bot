@@ -12,3 +12,4 @@ CLAUDE.md
 models/*.pkl
 __pycache__/
 .pytest_cache/
+changelog_state.json

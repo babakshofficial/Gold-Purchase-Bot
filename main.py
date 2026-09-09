@@ -80,6 +80,15 @@ from predictor import (
 )
 from goal_engine import compute_signal, GOAL_LABELS_FA, RISK_LABELS_FA, GOALS, RISKS
 from advisor import get_persian_advice
+from changelog import (
+    build_change_context,
+    draft_changelog_text,
+    get_head_sha,
+    has_pending_changes,
+    mark_broadcast,
+    mark_prompted,
+    mark_skipped,
+)
 
 load_dotenv()
 # ================= LOGGING =================
@@ -731,6 +740,41 @@ def get_all_users_with_notifications():
     results = c.fetchall()
     conn.close()
     return results
+
+
+def get_all_user_ids() -> list[int]:
+    """All registered Telegram user ids (for changelog / full broadcast)."""
+    conn = sqlite3.connect('gold_bot.db')
+    try:
+        c = conn.cursor()
+        c.execute('SELECT user_id FROM users')
+        return [int(row[0]) for row in c.fetchall()]
+    finally:
+        conn.close()
+
+
+async def broadcast_text_to_users(
+    bot,
+    text: str,
+    user_ids: list[int] | None = None,
+    parse_mode: str | None = "Markdown",
+) -> tuple[int, int]:
+    """Send text to every user. Returns (success_count, failed_count)."""
+    recipients = user_ids if user_ids is not None else get_all_user_ids()
+    success = 0
+    failed = 0
+    for user_id in recipients:
+        try:
+            kwargs = {"chat_id": user_id, "text": text}
+            if parse_mode:
+                kwargs["parse_mode"] = parse_mode
+            await bot.send_message(**kwargs)
+            success += 1
+            await asyncio.sleep(0.05)
+        except Exception as e:
+            logger.warning("Broadcast failed for user %s: %s", user_id, e)
+            failed += 1
+    return success, failed
 
 def get_user_count():
     conn = sqlite3.connect('gold_bot.db')
@@ -2681,6 +2725,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await navigate_back(update, context)
         return
 
+    if query.data.startswith("changelog_"):
+        await handle_changelog_callback(update, context)
+        return
+
     if query.data.startswith("admin_") or query.data.startswith("chart_") or query.data.startswith("db_") or query.data.startswith("export_") or query.data.startswith("ml_"):
         await audit_log(context, query.from_user.id, query.from_user.username, f"Callback: {query.data}", f"Admin action initiated: {query.data}")
         await admin_callback_handler(update, context)
@@ -3739,33 +3787,132 @@ async def admin_broadcast_start(update: Update, context: ContextTypes.DEFAULT_TY
         return ConversationHandler.END
     user = update.effective_user
     user_msg = "Command: /broadcast"
-    await update.message.reply_text("📢 پیام خود را برای ارسال به همه کاربران وارد کنید:")
+    await update.message.reply_text(msg.ADMIN_BROADCAST_PROMPT)
     await audit_log(context, user.id, user.username, user_msg, "Started broadcast conversation")
     return ASK_BROADCAST
 
 async def admin_broadcast_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message.text
-    all_users = get_all_users_with_notifications()
-    users_to_notify = [u[0] for u in all_users] 
-
-    success = 0
-    failed = 0
-    for user_id in users_to_notify:
-        try:
-            await context.bot.send_message(chat_id=user_id, text=message)
-            success += 1
-            await asyncio.sleep(0.05)  
-        except Exception as e:
-            logger.warning(f"Broadcast failed for user {user_id}: {e}")
-            failed += 1
-
-    await update.message.reply_text(
-        f"✅ پیام ارسال شد\n"
-        f"موفق: {success}\n"
-        f"ناموفق: {failed}"
+    success, failed = await broadcast_text_to_users(context.bot, message, parse_mode=None)
+    await update.message.reply_text(msg.admin_broadcast_result(success, failed))
+    await audit_log(
+        context,
+        update.effective_user.id,
+        update.effective_user.username,
+        "Broadcast sent",
+        f"Message: {message[:200]}... Success: {success}, Failed: {failed}",
     )
-    await audit_log(context, update.effective_user.id, update.effective_user.username, "Broadcast sent", f"Message: {message[:200]}... Success: {success}, Failed: {failed}")
     return ConversationHandler.END
+
+
+async def admin_broadcast_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("❌ ارسال همگانی لغو شد.")
+    return ConversationHandler.END
+
+
+def changelog_prompt_keyboard():
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton(msg.BTN_CHANGELOG_SEND, callback_data="changelog_send")],
+            [
+                InlineKeyboardButton(msg.BTN_CHANGELOG_REGEN, callback_data="changelog_regen"),
+                InlineKeyboardButton(msg.BTN_CHANGELOG_SKIP, callback_data="changelog_skip"),
+            ],
+        ]
+    )
+
+
+async def on_startup_changelog(application):
+    """After restart: if unbroadcast changes exist, draft changelog and DM admins."""
+    try:
+        if not has_pending_changes():
+            logger.info("Changelog: no pending changes — skip admin prompt")
+            return
+        if not ADMIN_IDS:
+            logger.warning("Changelog: ADMIN_IDS empty — cannot prompt")
+            return
+
+        ctx = build_change_context()
+        draft = await draft_changelog_text(commits=ctx["commits"], pending=ctx["pending"])
+        head = ctx["head_sha"] or get_head_sha() or "unknown"
+        mark_prompted(head, draft)
+        application.bot_data["changelog_draft"] = draft
+        application.bot_data["changelog_head"] = head
+
+        text = msg.changelog_admin_prompt(draft)
+        keyboard = changelog_prompt_keyboard()
+        for admin_id in ADMIN_IDS:
+            try:
+                await application.bot.send_message(
+                    chat_id=admin_id,
+                    text=text,
+                    parse_mode="Markdown",
+                    reply_markup=keyboard,
+                )
+            except Exception as e:
+                logger.warning("Changelog prompt failed for admin %s: %s", admin_id, e)
+        logger.info("Changelog: prompted %s admin(s)", len(ADMIN_IDS))
+    except Exception:
+        logger.exception("Changelog startup prompt failed")
+
+
+async def handle_changelog_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user = query.from_user
+    if not is_admin(user.id):
+        await query.answer("❌ شما دسترسی ندارید", show_alert=True)
+        return
+
+    await query.answer()
+    action = query.data
+
+    if action == "changelog_skip":
+        head = context.bot_data.get("changelog_head") or get_head_sha() or "unknown"
+        mark_skipped(head)
+        await query.edit_message_text(msg.CHANGELOG_SKIPPED)
+        await audit_log(context, user.id, user.username, "changelog_skip", f"head={head}")
+        return
+
+    if action == "changelog_regen":
+        await query.edit_message_text(msg.CHANGELOG_REGENERATING)
+        ctx = build_change_context()
+        draft = await draft_changelog_text(commits=ctx["commits"], pending=ctx["pending"])
+        head = ctx["head_sha"] or get_head_sha() or "unknown"
+        mark_prompted(head, draft)
+        context.bot_data["changelog_draft"] = draft
+        context.bot_data["changelog_head"] = head
+        await query.edit_message_text(
+            msg.changelog_admin_prompt(draft),
+            parse_mode="Markdown",
+            reply_markup=changelog_prompt_keyboard(),
+        )
+        return
+
+    if action == "changelog_send":
+        draft = context.bot_data.get("changelog_draft") or ""
+        if not draft:
+            from changelog import load_state
+
+            draft = (load_state().get("last_draft") or "").strip()
+        if not draft:
+            await query.edit_message_text(msg.CHANGELOG_NO_DRAFT)
+            return
+
+        await query.edit_message_text(msg.CHANGELOG_SENDING)
+        body = msg.changelog_broadcast_body(draft)
+        success, failed = await broadcast_text_to_users(context.bot, body)
+        head = context.bot_data.get("changelog_head") or get_head_sha() or "unknown"
+        mark_broadcast(head)
+        context.bot_data["changelog_draft"] = ""
+        await query.edit_message_text(msg.admin_broadcast_result(success, failed))
+        await audit_log(
+            context,
+            user.id,
+            user.username,
+            "changelog_send",
+            f"head={head} success={success} failed={failed}",
+        )
+        return
 
 # ================= PRICE MONITORING =================
 # Inside the monitor_prices function loop
@@ -3893,7 +4040,7 @@ def determine_verdict(var, buy_thresh, wait_thresh):
 
 # ================= MAIN =================
 def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app = ApplicationBuilder().token(BOT_TOKEN).post_init(on_startup_changelog).build()
 
     # Regular commands
     app.add_handler(CommandHandler("start", start))
@@ -3979,6 +4126,17 @@ def main():
     app.add_handler(CommandHandler("stats", admin_stats))
     app.add_handler(CommandHandler("test_audit", test_audit))
     app.add_handler(CommandHandler("health", admin_health_check))
+
+    broadcast_conv_handler = ConversationHandler(
+        entry_points=[CommandHandler("broadcast", admin_broadcast_start)],
+        states={
+            ASK_BROADCAST: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_broadcast_send),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", admin_broadcast_cancel)],
+    )
+    app.add_handler(broadcast_conv_handler)
 
     threshold_conv_handler = ConversationHandler(
     entry_points=[CallbackQueryHandler(set_threshold_type, pattern='^set_(buy|wait|significant_move)_threshold$')], # Update pattern
