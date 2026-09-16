@@ -138,6 +138,7 @@ ASK_PORTFOLIO_TRX = 13
 ASK_PORTFOLIO_USDT = 14
 ASK_SETGOAL_GOAL = 15
 ASK_SETGOAL_RISK = 16
+ASK_CHANGELOG_EDIT = 17
 
 PORTFOLIO_CRYPTO_KEYS = {
     "BTC": "portfolio_btc",
@@ -1545,6 +1546,7 @@ async def delete_message_safe(message):
 def clear_nav_state(context):
     context.user_data.pop('waiting_for_calc', None)
     context.user_data.pop('setting_threshold', None)
+    context.user_data.pop('awaiting_changelog_edit', None)
     _clear_portfolio_setup_data(context)
     context.user_data.pop(STORE_PREV_MENU, None)
     context.user_data.pop('requested_chart_type', None)
@@ -3141,6 +3143,8 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     user = update.effective_user
     user_text = update.message.text
 
+    if context.user_data.get('awaiting_changelog_edit'):
+        return await changelog_edit_receive(update, context)
     if context.user_data.get('waiting_for_calc'):
         return await calc_amount(update, context)
     elif context.user_data.get('setting_threshold'):
@@ -3162,6 +3166,7 @@ def admin_keyboard():
         [InlineKeyboardButton(msg.BTN_ADMIN_DB, callback_data="admin_db"),
          InlineKeyboardButton(msg.BTN_ADMIN_EXPORT, callback_data="admin_export")],
         [InlineKeyboardButton(msg.BTN_ADMIN_BROADCAST, callback_data="admin_broadcast_menu")],
+        [InlineKeyboardButton(msg.BTN_ADMIN_CHANGELOG, callback_data="admin_changelog")],
         [InlineKeyboardButton(msg.BTN_ADMIN_ML, callback_data="admin_ml")],
         [InlineKeyboardButton(msg.BTN_ADMIN_HEALTH, callback_data="admin_health_check")],
         back_row(NAV_MAIN),
@@ -3433,6 +3438,8 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
 
     if query.data == "admin_menu":
         await admin_menu(update, context, query)
+    elif query.data == "admin_changelog":
+        await admin_changelog_manual(update, context, query)
     elif query.data == "admin_ml":
         chat_id = query.message.chat_id
         await delete_message_safe(query.message)
@@ -3787,14 +3794,20 @@ async def admin_broadcast_start(update: Update, context: ContextTypes.DEFAULT_TY
         return ConversationHandler.END
     user = update.effective_user
     user_msg = "Command: /broadcast"
-    await update.message.reply_text(msg.ADMIN_BROADCAST_PROMPT)
+    await update.message.reply_text(
+        msg.ADMIN_BROADCAST_PROMPT,
+        reply_markup=kb_back(NAV_ADMIN),
+    )
     await audit_log(context, user.id, user.username, user_msg, "Started broadcast conversation")
     return ASK_BROADCAST
 
 async def admin_broadcast_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message.text
     success, failed = await broadcast_text_to_users(context.bot, message, parse_mode=None)
-    await update.message.reply_text(msg.admin_broadcast_result(success, failed))
+    await update.message.reply_text(
+        msg.admin_broadcast_result(success, failed),
+        reply_markup=kb_back(NAV_ADMIN),
+    )
     await audit_log(
         context,
         update.effective_user.id,
@@ -3815,40 +3828,70 @@ def changelog_prompt_keyboard():
         [
             [InlineKeyboardButton(msg.BTN_CHANGELOG_SEND, callback_data="changelog_send")],
             [
+                InlineKeyboardButton(msg.BTN_CHANGELOG_EDIT, callback_data="changelog_edit"),
                 InlineKeyboardButton(msg.BTN_CHANGELOG_REGEN, callback_data="changelog_regen"),
-                InlineKeyboardButton(msg.BTN_CHANGELOG_SKIP, callback_data="changelog_skip"),
             ],
+            [InlineKeyboardButton(msg.BTN_CHANGELOG_SKIP, callback_data="changelog_skip")],
+            back_row(NAV_ADMIN),
         ]
     )
 
 
-async def on_startup_changelog(application):
-    """After restart: if unbroadcast changes exist, draft changelog and DM admins."""
+async def build_and_store_changelog_draft(application_or_context, *, force: bool = False) -> tuple[str, str] | None:
+    """Draft changelog, store on bot_data. Returns (draft, head) or None if nothing to send."""
+    bot_data = application_or_context.bot_data
+    if not force and not has_pending_changes():
+        return None
+    ctx = build_change_context()
+    draft = await draft_changelog_text(commits=ctx["commits"], pending=ctx["pending"])
+    if not draft.strip() and force:
+        draft = "✨ بهبودها و به‌روزرسانی‌های اخیر ربات طلا."
+    head = ctx["head_sha"] or get_head_sha() or "unknown"
+    mark_prompted(head, draft)
+    bot_data["changelog_draft"] = draft
+    bot_data["changelog_head"] = head
+    return draft, head
+
+
+async def send_changelog_prompt(bot, chat_id: int, draft: str):
+    await bot.send_message(
+        chat_id=chat_id,
+        text=msg.changelog_admin_prompt(draft),
+        parse_mode="Markdown",
+        reply_markup=changelog_prompt_keyboard(),
+    )
+
+
+async def on_startup_train_and_changelog(application):
+    """On restart: retrain models, then prompt admins about changelog if needed."""
     try:
-        if not has_pending_changes():
-            logger.info("Changelog: no pending changes — skip admin prompt")
-            return
+        logger.info("Startup: running train_and_save…")
+        metrics = await asyncio.to_thread(
+            lambda: train_and_save(
+                db_path="gold_bot.db",
+                models_dir="models",
+                triggered_by="bot_startup",
+            )
+        )
+        logger.info(
+            "Startup training done: %s",
+            {k: v for k, v in (metrics or {}).items() if k != "_meta"},
+        )
+    except Exception:
+        logger.exception("Startup training failed")
+
+    try:
         if not ADMIN_IDS:
             logger.warning("Changelog: ADMIN_IDS empty — cannot prompt")
             return
-
-        ctx = build_change_context()
-        draft = await draft_changelog_text(commits=ctx["commits"], pending=ctx["pending"])
-        head = ctx["head_sha"] or get_head_sha() or "unknown"
-        mark_prompted(head, draft)
-        application.bot_data["changelog_draft"] = draft
-        application.bot_data["changelog_head"] = head
-
-        text = msg.changelog_admin_prompt(draft)
-        keyboard = changelog_prompt_keyboard()
+        result = await build_and_store_changelog_draft(application, force=False)
+        if not result:
+            logger.info("Changelog: no pending changes — skip admin prompt")
+            return
+        draft, _head = result
         for admin_id in ADMIN_IDS:
             try:
-                await application.bot.send_message(
-                    chat_id=admin_id,
-                    text=text,
-                    parse_mode="Markdown",
-                    reply_markup=keyboard,
-                )
+                await send_changelog_prompt(application.bot, admin_id, draft)
             except Exception as e:
                 logger.warning("Changelog prompt failed for admin %s: %s", admin_id, e)
         logger.info("Changelog: prompted %s admin(s)", len(ADMIN_IDS))
@@ -3869,18 +3912,26 @@ async def handle_changelog_callback(update: Update, context: ContextTypes.DEFAUL
     if action == "changelog_skip":
         head = context.bot_data.get("changelog_head") or get_head_sha() or "unknown"
         mark_skipped(head)
-        await query.edit_message_text(msg.CHANGELOG_SKIPPED)
+        await query.edit_message_text(
+            msg.CHANGELOG_SKIPPED,
+            reply_markup=kb_back(NAV_ADMIN),
+        )
         await audit_log(context, user.id, user.username, "changelog_skip", f"head={head}")
+        return
+
+    if action == "changelog_edit":
+        await query.edit_message_text(
+            msg.CHANGELOG_EDIT_PROMPT,
+            parse_mode="Markdown",
+            reply_markup=kb_back(NAV_ADMIN),
+        )
+        context.user_data["awaiting_changelog_edit"] = True
         return
 
     if action == "changelog_regen":
         await query.edit_message_text(msg.CHANGELOG_REGENERATING)
-        ctx = build_change_context()
-        draft = await draft_changelog_text(commits=ctx["commits"], pending=ctx["pending"])
-        head = ctx["head_sha"] or get_head_sha() or "unknown"
-        mark_prompted(head, draft)
-        context.bot_data["changelog_draft"] = draft
-        context.bot_data["changelog_head"] = head
+        result = await build_and_store_changelog_draft(context, force=True)
+        draft = result[0] if result else msg.CHANGELOG_NO_DRAFT
         await query.edit_message_text(
             msg.changelog_admin_prompt(draft),
             parse_mode="Markdown",
@@ -3895,7 +3946,10 @@ async def handle_changelog_callback(update: Update, context: ContextTypes.DEFAUL
 
             draft = (load_state().get("last_draft") or "").strip()
         if not draft:
-            await query.edit_message_text(msg.CHANGELOG_NO_DRAFT)
+            await query.edit_message_text(
+                msg.CHANGELOG_NO_DRAFT,
+                reply_markup=changelog_prompt_keyboard(),
+            )
             return
 
         await query.edit_message_text(msg.CHANGELOG_SENDING)
@@ -3904,7 +3958,10 @@ async def handle_changelog_callback(update: Update, context: ContextTypes.DEFAUL
         head = context.bot_data.get("changelog_head") or get_head_sha() or "unknown"
         mark_broadcast(head)
         context.bot_data["changelog_draft"] = ""
-        await query.edit_message_text(msg.admin_broadcast_result(success, failed))
+        await query.edit_message_text(
+            msg.admin_broadcast_result(success, failed),
+            reply_markup=kb_back(NAV_ADMIN),
+        )
         await audit_log(
             context,
             user.id,
@@ -3913,6 +3970,54 @@ async def handle_changelog_callback(update: Update, context: ContextTypes.DEFAUL
             f"head={head} success={success} failed={failed}",
         )
         return
+
+
+async def changelog_edit_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Save admin-edited changelog text and re-show the prompt."""
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ شما دسترسی ندارید")
+        return ConversationHandler.END
+    text = (update.message.text or "").strip()
+    if not text:
+        await update.message.reply_text(msg.CHANGELOG_EDIT_PROMPT, reply_markup=kb_back(NAV_ADMIN))
+        return ASK_CHANGELOG_EDIT
+
+    head = context.bot_data.get("changelog_head") or get_head_sha() or "unknown"
+    mark_prompted(head, text)
+    context.bot_data["changelog_draft"] = text
+    context.bot_data["changelog_head"] = head
+    context.user_data.pop("awaiting_changelog_edit", None)
+    await update.message.reply_text(msg.CHANGELOG_EDIT_SAVED)
+    await send_changelog_prompt(context.bot, update.effective_chat.id, text)
+    return ConversationHandler.END
+
+
+async def admin_changelog_manual(update: Update, context: ContextTypes.DEFAULT_TYPE, query=None):
+    """Admin panel: manually draft and preview changelog."""
+    query = query or update.callback_query
+    user = query.from_user
+    if not is_admin(user.id):
+        await query.answer(msg.ERROR_ACCESS_DENIED, show_alert=True)
+        return
+    await query.answer()
+    await query.edit_message_text(
+        msg.CHANGELOG_REGENERATING,
+        reply_markup=kb_back(NAV_ADMIN),
+    )
+    had_pending = has_pending_changes()
+    result = await build_and_store_changelog_draft(context, force=True)
+    draft = result[0] if result else "✨ بهبودها و به‌روزرسانی‌های اخیر ربات طلا."
+    note = "" if had_pending else (msg.CHANGELOG_MANUAL_EMPTY + "\n\n")
+    await query.edit_message_text(
+        note + msg.changelog_admin_prompt(draft),
+        parse_mode="Markdown",
+        reply_markup=changelog_prompt_keyboard(),
+    )
+    await audit_log(context, user.id, user.username, "admin_changelog", "Manual changelog draft")
+
+
+# Keep old name as alias for any external references
+on_startup_changelog = on_startup_train_and_changelog
 
 # ================= PRICE MONITORING =================
 # Inside the monitor_prices function loop
@@ -4040,7 +4145,7 @@ def determine_verdict(var, buy_thresh, wait_thresh):
 
 # ================= MAIN =================
 def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).post_init(on_startup_changelog).build()
+    app = ApplicationBuilder().token(BOT_TOKEN).post_init(on_startup_train_and_changelog).build()
 
     # Regular commands
     app.add_handler(CommandHandler("start", start))

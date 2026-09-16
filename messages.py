@@ -60,8 +60,10 @@ BTN_ADMIN_ML_PREDICT = "🔮 تست پیش‌بینی"
 BTN_ADMIN_ML_TRAIN = "▶️ آموزش مجدد"
 BTN_ADMIN_ML_CLEAR = "🗑 پاک کردن مدل‌ها"
 BTN_CHANGELOG_SEND = "✅ ارسال برای همه"
+BTN_CHANGELOG_EDIT = "✏️ ویرایش متن"
 BTN_CHANGELOG_REGEN = "🔄 تولید دوباره"
 BTN_CHANGELOG_SKIP = "⏭ رد کردن"
+BTN_ADMIN_CHANGELOG = "📢 Changelog"
 
 
 # ================= WELCOME =================
@@ -902,6 +904,13 @@ CHANGELOG_SKIPPED = "⏭ ارسال changelog رد شد. تا تغییر بعد�
 CHANGELOG_SENDING = "⏳ در حال ارسال changelog برای همه کاربران…"
 CHANGELOG_NO_DRAFT = "❌ متن changelog موجود نیست. دوباره تولید کنید."
 CHANGELOG_REGENERATING = "⏳ در حال تولید دوباره متن…"
+CHANGELOG_EDIT_PROMPT = (
+    "✏️ **ویرایش changelog**\n\n"
+    "متن جدید را ارسال کنید. این متن جایگزین پیش‌نویس فعلی می‌شود."
+)
+CHANGELOG_EDIT_SAVED = "✅ متن changelog به‌روز شد."
+CHANGELOG_MANUAL_EMPTY = "ℹ️ تغییری برای اعلام پیدا نشد؛ یک پیش‌نویس کلی ساخته شد."
+CHANGELOG_TRAINING_START = "🧠 آموزش مدل در پس‌زمینه شروع شد…"
 
 
 def changelog_admin_prompt(draft: str) -> str:
