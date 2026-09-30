@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
 import re
 import numpy as np # For technical indicators
-from usd_fetch import fetch_usd_toman
+from usd_fetch import USD_CHANNEL_FALLBACK, USD_CHANNEL_PRIMARY, fetch_usd_toman
 
 # ================= LOGGING =================
 logging.basicConfig(
@@ -19,8 +19,11 @@ logger = logging.getLogger("gold_crawler")
 
 # ================= CONFIG ==================
 GOLD_CHANNEL_USERNAME = "ecogold_ir"
+USD_CHANNEL_USERNAME = USD_CHANNEL_PRIMARY
 GOLD_CHANNEL_URL = f"https://t.me/s/{GOLD_CHANNEL_USERNAME}"
 REQUEST_TIMEOUT = 10
+MAX_USD_FETCH_ATTEMPTS = 5
+USD_RETRY_BACKOFF_FACTOR = 2
 # Trend Analysis Config (for crawler)
 TREND_HOURS = 6 # Hours to look back for trend analysis
 MIN_HISTORY_FOR_RSI = 14 # Minimum historical points needed for RSI
@@ -164,12 +167,21 @@ def fetch_and_parse_gold(max_attempts: int = 10):
 
     raise ValueError("Gold data not found in recent posts")
 
-def fetch_and_parse_usd(max_attempts: int = 10):
-    return fetch_usd_toman(max_attempts=max_attempts, timeout=REQUEST_TIMEOUT)
+def fetch_and_parse_usd(max_attempts: int = MAX_USD_FETCH_ATTEMPTS):
+    """USD in Toman from @nerkhedular (معامله), fallback @tgjucurrency — same as main bot."""
+    return fetch_usd_toman(
+        max_attempts=max_attempts,
+        timeout=REQUEST_TIMEOUT,
+        backoff_factor=USD_RETRY_BACKOFF_FACTOR,
+    )
 
 # ================= MAIN CRAWLER LOOP =================
 def main():
-    logger.info("Crawler service started. Fetching data every 10 minutes...")
+    logger.info(
+        "Crawler service started. USD: @%s (fallback @%s). Fetching every 10 minutes...",
+        USD_CHANNEL_USERNAME,
+        USD_CHANNEL_FALLBACK,
+    )
     while True:
         try:
             logger.info("Crawler: Fetching data...")
