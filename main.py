@@ -90,6 +90,7 @@ from changelog import (
     mark_prompted,
     mark_skipped,
 )
+from market_indicators import calculate_market_indicators, trend_label_fa
 
 load_dotenv()
 # ================= LOGGING =================
@@ -687,31 +688,53 @@ def get_price_history(limit=24):
     conn.close()
     return results[::-1]
 
-def get_price_history_for_analysis_bot(hours=TREND_HOURS):
-    """Get price history for the last N hours from the database (for bot analysis) - prioritizes 'crawler' data"""
+def get_difference_series_for_analysis(hours=TREND_HOURS, fallback_limit=30):
+    """Recent price gaps (market − fair) for indicator math; any source (bot or crawler)."""
     conn = sqlite3.connect('gold_bot.db')
     c = conn.cursor()
-    sql_query = '''SELECT rsi, volatility, trend, timestamp
-                   FROM price_history
-                   WHERE timestamp >= datetime('now', '-{} hours')
-                   AND source = 'crawler'
-                   ORDER BY timestamp DESC LIMIT 1'''.format(hours)
-    logger.debug(f"Bot analysis query: {sql_query}")
-    try:
-        c.execute(sql_query)
-        latest_crawler_analysis = c.fetchone()
-    except sqlite3.Error as e:
-        logger.error(f"Database query error in get_price_history_for_analysis_bot: {e}")
-        latest_crawler_analysis = None
+    c.execute(
+        '''SELECT difference FROM price_history
+           WHERE difference IS NOT NULL
+           AND timestamp >= datetime('now', '-{} hours')
+           ORDER BY timestamp ASC'''.format(hours)
+    )
+    diffs = [float(row[0]) for row in c.fetchall()]
+    if len(diffs) < 3:
+        c.execute(
+            '''SELECT difference FROM price_history
+               WHERE difference IS NOT NULL
+               ORDER BY timestamp DESC LIMIT ?''',
+            (fallback_limit,),
+        )
+        recent = [float(row[0]) for row in c.fetchall()]
+        diffs = list(reversed(recent))
     conn.close()
+    return diffs
 
-    if latest_crawler_analysis:
-        rsi, volatility, trend, timestamp = latest_crawler_analysis
-        logger.info(f"Bot analysis: Using crawler data from {timestamp}")
-        return {"trend": trend, "rsi": rsi, "volatility": volatility}
+
+def get_price_history_for_analysis_bot(hours=TREND_HOURS, current_difference=None):
+    """RSI / volatility / trend from DB history plus the live gap for this /gold run."""
+    diffs = get_difference_series_for_analysis(hours)
+    if current_difference is not None:
+        diffs = diffs + [float(current_difference)]
+
+    metrics = calculate_market_indicators(diffs)
+    trend_str = trend_label_fa(str(metrics["trend"]))
+    rsi = metrics["rsi"]
+    vol = metrics["volatility"]
+    if isinstance(vol, (int, float)):
+        volatility_str = f"{vol:,.0f} تومان"
     else:
-        logger.info("Bot analysis: No recent crawler data found, using N/A")
-        return {"trend": "N/A", "rsi": "N/A", "volatility": "N/A"}
+        volatility_str = vol
+
+    logger.info(
+        "Bot analysis indicators from %s points: trend=%s rsi=%s vol=%s",
+        len(diffs),
+        trend_str,
+        rsi,
+        volatility_str,
+    )
+    return {"trend": trend_str, "rsi": rsi, "volatility": volatility_str}
 
 def get_price_history_by_timeframe(start_time, end_time):
     """Get price history for a specific time range from the database"""
@@ -1947,7 +1970,7 @@ async def gold_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE, quer
         if fair > 0:
             bubble_percentage = ((var) / fair) * 100
 
-        trend_info = get_price_history_for_analysis_bot(TREND_HOURS)
+        trend_info = get_price_history_for_analysis_bot(TREND_HOURS, current_difference=var)
         trend_str = trend_info.get('trend', 'N/A')
         rsi_str = trend_info.get('rsi', 'N/A')
         volatility_str = trend_info.get('volatility', 'N/A')

@@ -8,6 +8,7 @@ from bs4 import BeautifulSoup
 import re
 import numpy as np # For technical indicators
 from usd_fetch import USD_CHANNEL_FALLBACK, USD_CHANNEL_PRIMARY, fetch_usd_toman
+from market_indicators import calculate_market_indicators
 
 # ================= LOGGING =================
 logging.basicConfig(
@@ -54,59 +55,9 @@ def get_price_history_for_analysis_crawler(hours=TREND_HOURS):
     return results
 
 def calculate_rsi_and_volatility_and_trend_crawler(differences):
-    """Calculate RSI, Volatility, and Trend from a list of differences"""
-    # The function should only calculate if it has enough *historical* data points.
-    # The current difference is added *after* fetching history for analysis.
-    # So, if len(differences) < 3, we don't have enough history to calculate trend/indicators *for the current point*.
-    # Let's say we need at least 2 historical points to calculate a slope and 14 for RSI.
-    min_history_for_rsi = MIN_HISTORY_FOR_RSI
-    min_history_for_trend = MIN_HISTORY_FOR_TREND
-
-    if len(differences) < min_history_for_trend + 1: # +1 because current diff is included
-        logger.debug(f"Crawler: Not enough history for analysis (len={len(differences)}). Returning N/A.")
-        return "N/A", "N/A", "N/A"
-
-    # Calculate trend (simple linear regression slope) on historical data only
-    # Use differences[:-1] to exclude the *current* difference when calculating the slope for *historical* trend
-    historical_differences = differences[:-1]
-    if len(historical_differences) < min_history_for_trend:
-         # If removing current diff leaves insufficient data for trend, return N/A
-         logger.debug(f"Crawler: Insufficient historical data for trend after excluding current diff.")
-         return "N/A", "N/A", "N/A"
-
-    x = np.arange(len(historical_differences))
-    y = np.array(historical_differences)
-    slope, _ = np.polyfit(x, y, 1)
-
-    # Calculate RSI (Relative Strength Index) - Simplified 14-period, using historical data only
-    rsi = "N/A"
-    if len(historical_differences) >= min_history_for_rsi:
-        deltas = np.diff(historical_differences[-min_history_for_rsi:]) # Use last 14 historical points
-        gains = deltas[deltas > 0]
-        losses = -deltas[deltas < 0] # Make losses positive for calculation
-        avg_gain = gains.mean() if len(gains) > 0 else 0
-        avg_loss = losses.mean() if len(losses) > 0 else 0
-        if avg_loss != 0:
-            rs = avg_gain / avg_loss
-            rsi = 100 - (100 / (1 + rs))
-        else:
-            rsi = 100 if avg_gain > 0 else 0 # RSI is 100 if no losses, 0 if no gains
-    else:
-        logger.debug(f"Crawler: Insufficient historical data for RSI (need {min_history_for_rsi}, have {len(historical_differences)}).")
-
-    # Calculate Volatility (std of differences over the historical period)
-    volatility = np.std(historical_differences)
-
-    # Determine trend direction based on slope
-    if slope > 100: # Threshold for "strong" trend
-        trend = "UPWARD"
-    elif slope < -100:
-        trend = "DOWNWARD"
-    else:
-        trend = "FLAT"
-
-    logger.debug(f"Crawler: Calculated - RSI: {rsi}, Vol: {volatility}, Trend: {trend} based on {len(historical_differences)} historical points.")
-    return round(rsi, 2) if rsi != "N/A" else "N/A", round(volatility, 2), trend
+    """Calculate RSI, Volatility, and Trend from a list of differences."""
+    metrics = calculate_market_indicators([float(d) for d in differences])
+    return metrics["rsi"], metrics["volatility"], metrics["trend"]
 
 
 # ================= HELPERS FOR CRAWLER (copied from main bot script) =================
