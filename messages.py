@@ -698,7 +698,7 @@ def about_message(usd_channel: str, gold_channel: str, crypto_channel: str = "ar
         "این ربات قیمت طلای ۱۸ عیار را با ترکیب دلار آزاد و اونس جهانی تحلیل می‌کند، "
         "با مدل یادگیری ماشین قیمت آینده را پیش‌بینی می‌کند و توصیه فارسی ارائه می‌دهد.\n\n"
         "**منابع قیمت:**\n"
-        f"• دلار آزاد: @{usd_channel}\n"
+        f"• دلار (فردایی تهران): @{usd_channel}\n"
         f"• طلا، اونس و تتر: @{gold_channel}\n"
         f"• ارزهای دیجیتال: @{crypto_channel} (پشتیبان BTC/ETH: @CryptoPriceFeed)\n\n"
         "**سازنده:** @b4bak"

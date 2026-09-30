@@ -67,6 +67,7 @@ import numpy as np
 from telegram.helpers import escape_markdown 
 import messages as msg
 from crypto_fetch import fetch_crypto_prices, STAGE1_SYMBOLS, CRYPTO_CHANNEL_USERNAME
+from usd_fetch import USD_CHANNEL_PRIMARY, fetch_usd_toman
 from predictor import (
     predict_future,
     models_ready,
@@ -102,9 +103,8 @@ logger = logging.getLogger("gold_bot")
 # ================= CONFIG ==================
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 GOLD_CHANNEL_USERNAME = "ecogold_ir"
-USD_CHANNEL_USERNAME = "tgjucurrency"
+USD_CHANNEL_USERNAME = USD_CHANNEL_PRIMARY
 GOLD_CHANNEL_URL = f"https://t.me/s/{GOLD_CHANNEL_USERNAME}"
-USD_CHANNEL_URL = f"https://t.me/s/{USD_CHANNEL_USERNAME}"
 PRIVATE_CHANNEL_ID = os.getenv('PRIVATE_CHANNEL_ID')
 ADMIN_IDS = [int(x) for x in os.getenv('ADMIN_IDS', '').split(',') if x]
 REQUEST_TIMEOUT = 30
@@ -917,21 +917,6 @@ def parse_gold_post(text: str):
         float(ounce.group(1).replace(",", ""))
     )
 
-def parse_usd_post(text: str):
-    text = normalize(text)
-    if "قیمت ارزهای آزاد" not in text:
-        logger.debug(f"parse_usd_post: Skipping post, title does not contain 'قیمت ارزهای آزاد'. Content: {text[:200]}...")
-        return None
-
-    usd_line_match = re.search(r"🇺🇸\s*دلار\s*[:\s]*\s*([\d,]+)\s*ریال", text)
-    if not usd_line_match:
-        logger.warning(f"parse_usd_post: Could not find '🇺🇸 دلار : ... ریال' line in the expected format within post titled 'قیمت ارزهای آزاد'. Content: {text[:500]}...") # Log for debugging
-        return None
-
-    usd_rial = int(usd_line_match.group(1).replace(",", ""))
-    usd_toman = usd_rial / 10
-    return usd_toman
-
 def fetch_and_parse_gold():
     """Fetch gold data from posts titled 'قیمت طلا', trying multiple posts if needed."""
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -984,54 +969,13 @@ def fetch_and_parse_gold():
 
 
 def fetch_and_parse_usd():
-    """Fetch USD data from posts titled 'قیمت ارزهای آزاد', trying multiple posts if needed."""
-    headers = {"User-Agent": "Mozilla/5.0"}
-    session = requests_session_with_retries()
-    url = USD_CHANNEL_URL
-
-    for attempt in range(MAX_FETCH_ATTEMPTS):
-        try:
-            logger.info(f"Attempt {attempt + 1}/{MAX_FETCH_ATTEMPTS} to fetch USD data from {url}")
-            r = session.get(url, headers=headers, timeout=(REQUEST_CONNECT_TIMEOUT, REQUEST_READ_TIMEOUT))
-            r.raise_for_status()
-
-            soup = BeautifulSoup(r.text, "html.parser")
-            msgs = soup.select("div.tgme_widget_message_text")
-            if not msgs:
-                raise RuntimeError("No messages found in USD channel")
-
-            num_msgs_to_check = min(10, len(msgs))
-            for i in range(num_msgs_to_check):
-                msg_text = msgs[-(i+1)].get_text("\n", strip=True)
-                if msg_text and len(msg_text) > 20:
-                    result = parse_usd_post(msg_text)
-                    if result is not None:
-                        logger.info(f"Successfully parsed USD data ({result} Toman) from post #{i+1} (latest being #1), attempt {attempt + 1}.")
-                        return result
-                else:
-                    logger.debug(f"fetch_and_parse_usd: Skipping empty/short message #{i+1}, attempt {attempt + 1}")
-
-            logger.warning(f"USD price (from a post titled 'قیمت ارزهای آزاد' containing '🇺🇸 دلار : ... ریال') not found in the last {num_msgs_to_check} posts, attempt {attempt + 1}.")
-
-        except requests.exceptions.Timeout as e:
-            logger.warning(f"Request timeout on attempt {attempt + 1} for USD data: {e}")
-            if attempt == MAX_FETCH_ATTEMPTS - 1: # Last attempt
-                raise requests.exceptions.ReadTimeout(f"Failed to fetch USD data after {MAX_FETCH_ATTEMPTS} attempts due to timeout.")
-        except requests.exceptions.RequestException as e:
-            logger.warning(f"Request error on attempt {attempt + 1} for USD data: {e}")
-            if attempt == MAX_FETCH_ATTEMPTS - 1: # Last attempt
-                 raise RuntimeError(f"Failed to fetch USD data after {MAX_FETCH_ATTEMPTS} attempts: {e}")
-        except Exception as e:
-            logger.error(f"Unexpected error on attempt {attempt + 1} for USD data: {e}")
-            if attempt == MAX_FETCH_ATTEMPTS - 1: # Last attempt
-                 raise RuntimeError(f"Failed to fetch USD data after {MAX_FETCH_ATTEMPTS} attempts due to an unexpected error: {e}")
-
-        if attempt < MAX_FETCH_ATTEMPTS - 1:
-            wait_time = RETRY_BACKOFF_FACTOR ** attempt
-            logger.info(f"Waiting {wait_time} seconds before next USD fetch attempt...")
-            time.sleep(wait_time)
-
-    raise RuntimeError(f"USD price not found in the last {num_msgs_to_check} posts after {MAX_FETCH_ATTEMPTS} attempts.")
+    """Fetch USD in Toman from @nerkhedular (deal rate), with @tgjucurrency fallback."""
+    return fetch_usd_toman(
+        session=requests_session_with_retries(),
+        max_attempts=MAX_FETCH_ATTEMPTS,
+        timeout=(REQUEST_CONNECT_TIMEOUT, REQUEST_READ_TIMEOUT),
+        backoff_factor=RETRY_BACKOFF_FACTOR,
+    )
 
 
 def analyze_market(tala, usd_toman, ounce, buy_threshold, wait_threshold):

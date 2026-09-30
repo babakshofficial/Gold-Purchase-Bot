@@ -1,8 +1,8 @@
 {
-  "updated_at": "2026-09-09T10:33:59.783316+00:00",
+  "updated_at": "2026-09-22T04:38:30.882111+00:00",
   "state": "idle",
-  "last_success_at": "2026-09-09T10:33:59.781554+00:00",
-  "last_duration_sec": 0.360504,
-  "triggered_by": "admin_full_db",
+  "last_success_at": "2026-09-22T04:38:30.881336+00:00",
+  "last_duration_sec": 0.778512,
+  "triggered_by": "bot_startup",
   "message": "Last training succeeded"
 }
