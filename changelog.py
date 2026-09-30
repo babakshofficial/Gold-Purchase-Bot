@@ -96,30 +96,43 @@ def collect_commit_log(since_sha: str | None = None, limit: int = 15) -> str:
     return _run_git("log", "--oneline", f"-{limit}")
 
 
+def get_changelog_watermark(state: dict | None = None) -> str:
+    """Last HEAD whose changelog was sent or explicitly skipped (do not re-surface)."""
+    state = state if state is not None else load_state()
+    return (
+        state.get("last_changelog_sha")
+        or state.get("last_broadcast_sha")
+        or state.get("last_skipped_sha")
+        or ""
+    )
+
+
 def has_pending_changes(state: dict | None = None) -> bool:
     """True if there are unbroadcast changes that have not been skipped for this HEAD."""
     state = state if state is not None else load_state()
     head = get_head_sha()
     pending = read_pending_notes()
-    last_broadcast = state.get("last_broadcast_sha") or ""
+    watermark = get_changelog_watermark(state)
     last_prompted = state.get("last_prompted_sha") or ""
 
-    if head and head == last_prompted:
-        return False
-    if head and head == last_broadcast and not pending:
-        return False
     if pending:
         return True
     if not head:
         return False
-    return head != last_broadcast
+    if head == last_prompted:
+        return False
+    if watermark and head == watermark:
+        return False
+    if not watermark:
+        return True
+    return head != watermark
 
 
 def build_change_context(state: dict | None = None) -> dict:
     """Gather context for LLM / fallback drafting."""
     state = state if state is not None else load_state()
     head = get_head_sha()
-    since = state.get("last_broadcast_sha") or None
+    since = get_changelog_watermark(state) or None
     commits = collect_commit_log(since_sha=since)
     pending = read_pending_notes()
     return {
@@ -217,6 +230,7 @@ def mark_prompted(head_sha: str, draft: str) -> None:
 def mark_broadcast(head_sha: str) -> None:
     state = load_state()
     state["last_broadcast_sha"] = head_sha
+    state["last_changelog_sha"] = head_sha
     state["last_prompted_sha"] = head_sha
     state["last_draft"] = ""
     save_state(state)
@@ -226,4 +240,8 @@ def mark_broadcast(head_sha: str) -> None:
 def mark_skipped(head_sha: str) -> None:
     state = load_state()
     state["last_prompted_sha"] = head_sha
+    state["last_changelog_sha"] = head_sha
+    state["last_skipped_sha"] = head_sha
+    state["last_draft"] = ""
     save_state(state)
+    clear_pending_notes()

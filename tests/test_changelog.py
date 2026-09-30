@@ -54,6 +54,26 @@ class TestChangelog(unittest.TestCase):
         self.assertEqual(self.pending_file.read_text(encoding="utf-8"), "")
         state = json.loads(self.state_file.read_text(encoding="utf-8"))
         self.assertEqual(state["last_broadcast_sha"], "deadbeef")
+        self.assertEqual(state["last_changelog_sha"], "deadbeef")
+
+    def test_skip_clears_pending_and_watermark(self):
+        self.pending_file.write_text("- skipped feature\n", encoding="utf-8")
+        changelog.mark_skipped("sha_a")
+        self.assertEqual(self.pending_file.read_text(encoding="utf-8"), "")
+        state = json.loads(self.state_file.read_text(encoding="utf-8"))
+        self.assertEqual(state["last_changelog_sha"], "sha_a")
+        self.assertEqual(state["last_prompted_sha"], "sha_a")
+        with mock.patch.object(changelog, "get_head_sha", return_value="sha_a"):
+            self.assertFalse(changelog.has_pending_changes(state))
+
+    def test_new_head_after_skip_still_prompts(self):
+        """New deploy after skip should prompt (new commits), without old pending bullets."""
+        changelog.mark_skipped("sha_a")
+        state = json.loads(self.state_file.read_text(encoding="utf-8"))
+        with mock.patch.object(changelog, "get_head_sha", return_value="sha_b"):
+            self.assertTrue(changelog.has_pending_changes(state))
+        ctx = changelog.build_change_context(state)
+        self.assertEqual(ctx["since_sha"], "sha_a")
 
 
 if __name__ == "__main__":
