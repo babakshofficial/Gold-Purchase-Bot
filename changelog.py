@@ -12,12 +12,16 @@ import httpx
 
 logger = logging.getLogger("gold_bot")
 
-STATE_FILE = Path("changelog_state.json")
-PENDING_FILE = Path("changelog_pending.md")
+STATE_FILE = REPO_ROOT / "changelog_state.json"
+PENDING_FILE = REPO_ROOT / "changelog_pending.md"
 REPO_ROOT = Path(__file__).resolve().parent
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-MODEL = "google/gemini-2.0-flash-001"
+DEFAULT_OPENROUTER_MODEL = "google/gemini-2.5-flash"
+
+
+def openrouter_model() -> str:
+    return os.getenv("OPENROUTER_MODEL", "").strip() or DEFAULT_OPENROUTER_MODEL
 
 
 def load_state() -> dict:
@@ -128,11 +132,12 @@ def has_pending_changes(state: dict | None = None) -> bool:
     pending = read_pending_notes()
     watermark = get_changelog_watermark(state)
     last_broadcast = state.get("last_broadcast_sha") or ""
+    draft = (state.get("last_draft") or "").strip()
 
     if pending:
         return True
 
-    if head and head == last_broadcast:
+    if head and last_broadcast and head == last_broadcast:
         return False
 
     if head and watermark and head == watermark:
@@ -141,11 +146,14 @@ def has_pending_changes(state: dict | None = None) -> bool:
     if head and watermark and head != watermark:
         return True
 
-    if head and head != last_broadcast:
+    if head and not last_broadcast:
         return True
 
-    draft = (state.get("last_draft") or "").strip()
-    if draft and head and head != last_broadcast:
+    if draft and not last_broadcast:
+        return True
+
+    commits = collect_commit_log(since_sha=watermark or None)
+    if commits.strip() and not last_broadcast:
         return True
 
     return False
@@ -167,7 +175,7 @@ def build_change_context(state: dict | None = None) -> dict:
 
 
 def _fallback_changelog(commits: str, pending: str) -> str:
-    lines = ["📢 **به‌روزرسانی ربات طلا:**"]
+    lines = ["📢 به‌روزرسانی ربات طلا:"]
     if pending:
         for raw in pending.splitlines():
             text = raw.strip().lstrip("-•* ").strip()
@@ -222,7 +230,7 @@ async def draft_changelog_text(commits: str = "", pending: str = "") -> str:
                     "X-Title": "Gold Bot Changelog",
                 },
                 json={
-                    "model": MODEL,
+                    "model": openrouter_model(),
                     "messages": [
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt},

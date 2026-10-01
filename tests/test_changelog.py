@@ -80,6 +80,14 @@ class TestChangelog(unittest.TestCase):
         with mock.patch.object(changelog, "get_head_sha", return_value="sha_a"):
             self.assertFalse(changelog.has_pending_changes(state))
 
+    def test_unbroadcast_draft_triggers_pending(self):
+        state = {
+            "last_draft": "some draft",
+            "last_changelog_sha": "old",
+        }
+        with mock.patch.object(changelog, "get_head_sha", return_value=""):
+            self.assertTrue(changelog.has_pending_changes(state))
+
     def test_new_head_after_skip_still_prompts(self):
         """New deploy after skip should prompt (new commits), without old pending bullets."""
         changelog.mark_skipped("sha_a")

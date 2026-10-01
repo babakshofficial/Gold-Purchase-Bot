@@ -10,8 +10,9 @@ import httpx
 
 logger = logging.getLogger("gold_bot")
 
+from changelog import openrouter_model
+
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-MODEL = "google/gemini-2.0-flash-001"
 
 
 def _fallback_advice(
@@ -82,7 +83,7 @@ async def get_persian_advice(
                     "X-Title": "Gold Bot",
                 },
                 json={
-                    "model": MODEL,
+                    "model": openrouter_model(),
                     "messages": [
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt},

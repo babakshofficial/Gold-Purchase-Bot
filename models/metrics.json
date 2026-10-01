@@ -30,10 +30,10 @@
     "dir_acc": 47.05882352941176
   },
   "_meta": {
-    "trained_at": "2026-10-01T16:24:49.312778+00:00",
-    "duration_sec": 0.422909,
+    "trained_at": "2026-10-01T16:29:35.609626+00:00",
+    "duration_sec": 0.414597,
     "triggered_by": "bot_startup",
-    "row_samples": 15640,
+    "row_samples": 15643,
     "daily_samples": 142,
     "feature_count": 60,
     "backend": "xgboost",

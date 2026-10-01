@@ -84,8 +84,10 @@ from advisor import get_persian_advice
 from changelog import (
     build_change_context,
     draft_changelog_text,
+    get_changelog_watermark,
     get_head_sha,
     has_pending_changes,
+    load_state,
     mark_broadcast,
     mark_prompted,
     mark_skipped,
@@ -3860,36 +3862,85 @@ def changelog_prompt_keyboard():
 
 async def build_and_store_changelog_draft(application_or_context, *, force: bool = False) -> tuple[str, str] | None:
     """Draft changelog, store on bot_data. Returns (draft, head) or None if nothing to send."""
+    from changelog import collect_commit_log
+
     bot_data = application_or_context.bot_data
     if not force and not has_pending_changes():
+        logger.info("Changelog draft: has_pending_changes=False, skipping")
         return None
     ctx = build_change_context()
-    if not force and not ctx["pending"] and not ctx["commits"].strip():
-        return None
-    draft = await draft_changelog_text(commits=ctx["commits"], pending=ctx["pending"])
+    commits = ctx["commits"]
+    pending = ctx["pending"]
+    if not commits.strip() and not pending:
+        commits = collect_commit_log(since_sha=ctx.get("since_sha") or None, limit=15)
+    if not commits.strip():
+        commits = collect_commit_log(since_sha=None, limit=15)
+
+    draft = await draft_changelog_text(commits=commits, pending=pending)
     if not draft.strip():
-        if force:
+        saved = (load_state().get("last_draft") or "").strip()
+        if saved:
+            draft = saved
+        elif force or has_pending_changes():
             draft = "✨ بهبودها و به‌روزرسانی‌های اخیر ربات طلا."
         else:
+            logger.info("Changelog draft: empty draft and no fallback")
             return None
     head = ctx["head_sha"] or get_head_sha() or "unknown"
     mark_prompted(head, draft)
     bot_data["changelog_draft"] = draft
     bot_data["changelog_head"] = head
+    logger.info("Changelog draft stored for head=%s (%s chars)", head[:8], len(draft))
     return draft, head
 
 
-async def send_changelog_prompt(bot, chat_id: int, draft: str):
-    await bot.send_message(
-        chat_id=chat_id,
-        text=msg.changelog_admin_prompt(draft),
-        parse_mode="Markdown",
+async def edit_changelog_admin_prompt(query, draft: str, *, prefix: str = ""):
+    """Show changelog preview on an existing admin message (plain text — safe for git subjects)."""
+    body = prefix + msg.changelog_admin_prompt(draft)
+    if len(body) > 4096:
+        body = body[:4090] + "…"
+    await query.edit_message_text(
+        body,
         reply_markup=changelog_prompt_keyboard(),
     )
 
 
-async def on_startup_train_and_changelog(application):
-    """On restart: retrain models, then prompt admins about changelog if needed."""
+async def send_changelog_prompt(bot, chat_id: int, draft: str):
+    text = msg.changelog_admin_prompt(draft)
+    if len(text) > 4096:
+        text = text[:4090] + "…"
+    await bot.send_message(
+        chat_id=chat_id,
+        text=text,
+        reply_markup=changelog_prompt_keyboard(),
+    )
+
+
+async def deliver_startup_changelog_prompt(context: ContextTypes.DEFAULT_TYPE):
+    """Job-queue callback: send changelog to admins after bot is fully up."""
+    application = context.application
+    if not ADMIN_IDS:
+        logger.warning("Changelog: ADMIN_IDS empty — cannot prompt")
+        return
+    result = await build_and_store_changelog_draft(application, force=False)
+    if not result:
+        logger.info(
+            "Changelog: no prompt sent (pending=%s state=%s cwd=%s)",
+            has_pending_changes(),
+            load_state().keys(),
+            os.getcwd(),
+        )
+        return
+    draft, head = result
+    for admin_id in ADMIN_IDS:
+        try:
+            await send_changelog_prompt(application.bot, admin_id, draft)
+            logger.info("Changelog: sent prompt to admin %s (head=%s)", admin_id, head[:8])
+        except Exception as e:
+            logger.warning("Changelog prompt failed for admin %s: %s", admin_id, e)
+
+
+async def startup_train_background(application):
     try:
         logger.info("Startup: running train_and_save…")
         metrics = await asyncio.to_thread(
@@ -3906,23 +3957,32 @@ async def on_startup_train_and_changelog(application):
     except Exception:
         logger.exception("Startup training failed")
 
-    try:
-        if not ADMIN_IDS:
-            logger.warning("Changelog: ADMIN_IDS empty — cannot prompt")
-            return
-        result = await build_and_store_changelog_draft(application, force=False)
-        if not result:
-            logger.info("Changelog: no pending changes — skip admin prompt")
-            return
-        draft, _head = result
-        for admin_id in ADMIN_IDS:
-            try:
-                await send_changelog_prompt(application.bot, admin_id, draft)
-            except Exception as e:
-                logger.warning("Changelog prompt failed for admin %s: %s", admin_id, e)
-        logger.info("Changelog: prompted %s admin(s)", len(ADMIN_IDS))
-    except Exception:
-        logger.exception("Changelog startup prompt failed")
+
+async def on_startup_train_and_changelog(application):
+    """On restart: schedule changelog prompt, train models in background."""
+    st = load_state()
+    logger.info(
+        "Startup changelog check: head=%s watermark=%s last_broadcast=%s has_pending=%s cwd=%s",
+        (get_head_sha() or "none")[:12],
+        (get_changelog_watermark(st) or "none")[:12],
+        (st.get("last_broadcast_sha") or "none")[:12],
+        has_pending_changes(st),
+        os.getcwd(),
+    )
+
+    if application.job_queue:
+        application.job_queue.run_once(
+            deliver_startup_changelog_prompt,
+            when=3,
+            name="startup_changelog_prompt",
+        )
+    else:
+        logger.warning("Changelog: job_queue unavailable; sending prompt inline")
+        from types import SimpleNamespace
+
+        await deliver_startup_changelog_prompt(SimpleNamespace(application=application))
+
+    asyncio.create_task(startup_train_background(application))
 
 
 async def handle_changelog_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3958,11 +4018,7 @@ async def handle_changelog_callback(update: Update, context: ContextTypes.DEFAUL
         await query.edit_message_text(msg.CHANGELOG_REGENERATING)
         result = await build_and_store_changelog_draft(context, force=True)
         draft = result[0] if result else msg.CHANGELOG_NO_DRAFT
-        await query.edit_message_text(
-            msg.changelog_admin_prompt(draft),
-            parse_mode="Markdown",
-            reply_markup=changelog_prompt_keyboard(),
-        )
+        await edit_changelog_admin_prompt(query, draft)
         return
 
     if action == "changelog_send":
@@ -3980,7 +4036,7 @@ async def handle_changelog_callback(update: Update, context: ContextTypes.DEFAUL
 
         await query.edit_message_text(msg.CHANGELOG_SENDING)
         body = msg.changelog_broadcast_body(draft)
-        success, failed = await broadcast_text_to_users(context.bot, body)
+        success, failed = await broadcast_text_to_users(context.bot, body, parse_mode=None)
         head = context.bot_data.get("changelog_head") or get_head_sha() or "unknown"
         mark_broadcast(head)
         context.bot_data["changelog_draft"] = ""
@@ -4034,11 +4090,7 @@ async def admin_changelog_manual(update: Update, context: ContextTypes.DEFAULT_T
     result = await build_and_store_changelog_draft(context, force=True)
     draft = result[0] if result else "✨ بهبودها و به‌روزرسانی‌های اخیر ربات طلا."
     note = "" if had_pending else (msg.CHANGELOG_MANUAL_EMPTY + "\n\n")
-    await query.edit_message_text(
-        note + msg.changelog_admin_prompt(draft),
-        parse_mode="Markdown",
-        reply_markup=changelog_prompt_keyboard(),
-    )
+    await edit_changelog_admin_prompt(query, draft, prefix=note)
     await audit_log(context, user.id, user.username, "admin_changelog", "Manual changelog draft")
 
 

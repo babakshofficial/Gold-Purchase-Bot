@@ -901,7 +901,7 @@ ADMIN_FILE_SENT = "✅ فایل ارسال شد"
 ADMIN_BROADCAST_MENU = "📢 **ارسال پیام همگانی**\nنوع ارسال را انتخاب کنید:"
 ADMIN_BROADCAST_PROMPT = "📢 پیام خود را برای ارسال به همه کاربران وارد کنید:"
 
-CHANGELOG_USER_HEADER = "📢 **به‌روزرسانی ربات**\n\n"
+CHANGELOG_USER_HEADER = "📢 به‌روزرسانی ربات\n\n"
 CHANGELOG_SKIPPED = "⏭ ارسال changelog رد شد. تا تغییر بعدی دوباره نمی‌پرسم."
 CHANGELOG_SENDING = "⏳ در حال ارسال changelog برای همه کاربران…"
 CHANGELOG_NO_DRAFT = "❌ متن changelog موجود نیست. دوباره تولید کنید."
@@ -916,8 +916,9 @@ CHANGELOG_TRAINING_START = "🧠 آموزش مدل در پس‌زمینه شرو
 
 
 def changelog_admin_prompt(draft: str) -> str:
+    """Plain text (draft may contain Markdown-like commit subjects)."""
     return (
-        "🆕 **نسخه جدید آماده است**\n\n"
+        "🆕 نسخه جدید آماده است\n\n"
         "متن پیشنهادی changelog:\n"
         f"{draft}\n\n"
         "ارسال برای همه کاربران؟"
