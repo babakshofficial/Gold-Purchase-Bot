@@ -241,7 +241,7 @@ def crypto_prices_message(
     stale: bool = False,
     missing: list[str] | None = None,
 ) -> str:
-    lines = ["🪙 **قیمت لحظه‌ای ارزهای دیجیتال**", f"🕒 {fetched_at}"]
+    lines = ["🪙 قیمت لحظه‌ای ارزهای دیجیتال", f"🕒 {fetched_at}"]
     if stale:
         lines.append(STALE_DATA_NOTE.strip())
     lines.append("")
@@ -250,7 +250,7 @@ def crypto_prices_message(
         emoji, name = CRYPTO_NAMES.get(symbol, ("", symbol))
         entry = prices.get(symbol)
         if not entry:
-            lines.append(f"{emoji} **{name} ({symbol})**")
+            lines.append(f"{emoji} {name} ({symbol})")
             lines.append("   ❌ نامشخص")
             lines.append("")
             continue
@@ -268,7 +268,7 @@ def crypto_prices_message(
             change_part = f"  {arrow} \u200e{change:+.2f}%\u200e"
 
         source_note = ""
-        lines.append(f"\u200f{emoji} **{name} ({symbol})**{change_part}")
+        lines.append(f"\u200f{emoji} {name} ({symbol}){change_part}")
         lines.append(f"   {usd_part}  |  {toman_part}{source_note}")
         lines.append("")
 
@@ -881,6 +881,16 @@ ADMIN_ML_CLEAR_CONFIRM = (
 
 ERROR_GENERIC = "❌ خطایی رخ داد. لطفاً دوباره تلاش کنید."
 ERROR_FETCH = "❌ خطا در دریافت اطلاعات. لطفاً دوباره تلاش کنید."
+CRYPTO_LOADING = "⏳ در حال دریافت قیمت ارزهای دیجیتال…"
+CRYPTO_TELEGRAM_TIMEOUT = (
+    "⚠️ ارسال به تلگرام طول کشید (شبکه/پروکسی).\n"
+    "لطفاً چند ثانیه بعد دوباره «🔄 به‌روزرسانی» را بزنید."
+)
+CRYPTO_LOADING = "⏳ در حال دریافت قیمت ارزهای دیجیتال…"
+CRYPTO_TELEGRAM_TIMEOUT = (
+    "⚠️ ارسال به تلگرام طول کشید (شبکه/پروکسی).\n"
+    "لطفاً چند ثانیه بعد دوباره «🔄 به‌روزرسانی» را بزنید."
+)
 ERROR_NO_DATA = "❌ داده‌ای برای نمایش وجود ندارد."
 ERROR_INVALID_NUMBER = "❌ لطفاً یک عدد معتبر وارد کنید."
 ERROR_POSITIVE_NUMBER = "❌ مقدار باید بزرگ‌تر از صفر باشد."

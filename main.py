@@ -23,6 +23,7 @@ from telegram.ext import (
     CallbackQueryHandler,
     filters
 )
+from telegram.request import HTTPXRequest
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -1437,61 +1438,31 @@ def generate_crypto_price_chart(symbol: str, start_time, end_time):
 
 # ================= AUDIT LOGGING =================
 async def audit_log(context: ContextTypes.DEFAULT_TYPE, user_id, username, command, response_summary):
-    """Audit logging with command and response summary"""
+    """Audit logging with command and response summary (plain text — safe for any user input)."""
     if not PRIVATE_CHANNEL_ID:
         logger.warning("PRIVATE_CHANNEL_ID not set - skipping audit log")
         return
 
-    logger.debug(f"Audit Log Raw Username: '{username}', Raw Command: '{command}', Raw Response Summary: '{response_summary}'")
-
-    username_display = escape_for_markdown_v2(username if username else "No username")
-
+    username_display = username if username else "No username"
     max_msg_length = 3000
     if len(command) > max_msg_length:
         command = command[:max_msg_length] + "... (truncated)"
     if len(response_summary) > max_msg_length:
         response_summary = response_summary[:max_msg_length] + "... (truncated)"
 
-    escaped_command = escape_for_markdown_v2(command)
-    escaped_response_summary = escape_for_markdown_v2(response_summary)
-
-    logger.debug(f"Audit Log Escaped Username: '{username_display}', Escaped Command: '{escaped_command}', Escaped Response Summary: '{escaped_response_summary}'")
-
-    msg_part1 = (
-        f"📨 **Interaction Log**\n"
-        f"👤 User: {username_display} (`{user_id}`)\n"
+    msg_text = (
+        "📨 Interaction Log\n"
+        f"👤 User: {username_display} ({user_id})\n"
         f"⏰ Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        f"📥 Command/Action: {command}\n"
+        f"📤 Response Summary: {response_summary[:1000]}"
     )
-    msg_part2 = f"📥 **Command/Action:** `{escaped_command}`\n"
-    msg_part3 = f"📤 **Response Summary:** {escaped_response_summary[:1000]}"
-
-    msg = msg_part1 + msg_part2 + msg_part3
 
     try:
-        await context.bot.send_message(
-            chat_id=PRIVATE_CHANNEL_ID,
-            text=msg,
-            parse_mode="MarkdownV2")
+        await context.bot.send_message(chat_id=PRIVATE_CHANNEL_ID, text=msg_text)
         logger.info(f"Audit log sent for user {user_id}")
     except Exception as e:
         logger.error(f"Audit send failed for user {user_id}: {e}")
-        try:
-            simple_msg_part1 = (
-                f"📨 Interaction Log\n"
-                f"User: {username_display} ({user_id})\n" 
-                f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-            )
-            simple_msg_part2 = f"Command/Action: {command[:500]}\n" 
-            simple_msg_part3 = f"Response Summary: {response_summary[:500]}" 
-            simple_msg = simple_msg_part1 + simple_msg_part2 + simple_msg_part3
-
-            await context.bot.send_message(
-                chat_id=PRIVATE_CHANNEL_ID,
-                text=simple_msg
-            )
-            logger.info(f"Audit log sent (fallback) for user {user_id}")
-        except Exception as e2:
-            logger.error(f"Audit fallback also failed for user {user_id}: {e2}")
 
 # ================= NAVIGATION =================
 
@@ -2344,25 +2315,83 @@ async def show_history_chart(update: Update, context: ContextTypes.DEFAULT_TYPE,
             await update.message.reply_text(error_msg)
 
 
+async def _bot_send_with_retry(bot, *, chat_id: int, text: str, reply_markup=None, retries: int = 2):
+    """Send message; retry on Telegram network timeout (common with proxychains)."""
+    last_err = None
+    for attempt in range(retries):
+        try:
+            return await bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                reply_markup=reply_markup,
+            )
+        except (telegram.error.TimedOut, telegram.error.NetworkError) as e:
+            last_err = e
+            logger.warning("Telegram send timeout attempt %s/%s: %s", attempt + 1, retries, e)
+            if attempt < retries - 1:
+                await asyncio.sleep(1.5)
+    raise last_err
+
+
+async def _bot_edit_with_retry(message, text: str, reply_markup=None, retries: int = 2):
+    last_err = None
+    for attempt in range(retries):
+        try:
+            return await message.edit_text(text, reply_markup=reply_markup)
+        except (telegram.error.TimedOut, telegram.error.NetworkError) as e:
+            last_err = e
+            logger.warning("Telegram edit timeout attempt %s/%s: %s", attempt + 1, retries, e)
+            if attempt < retries - 1:
+                await asyncio.sleep(1.5)
+    raise last_err
+
+
 async def send_crypto_prices(context: ContextTypes.DEFAULT_TYPE, chat_id: int, reply_markup=None):
     """Fetch and send live crypto prices."""
+    status_msg = None
     try:
-        prices, stale = fetch_current_crypto_prices()
+        status_msg = await context.bot.send_message(chat_id, msg.CRYPTO_LOADING)
+    except (telegram.error.TimedOut, telegram.error.NetworkError) as e:
+        logger.warning("Could not send crypto loading message: %s", e)
+
+    try:
+        prices, stale = await asyncio.to_thread(fetch_current_crypto_prices)
     except Exception:
-        await context.bot.send_message(
-            chat_id, msg.ERROR_FETCH, parse_mode="Markdown", reply_markup=kb_back(NAV_MAIN)
-        )
+        logger.exception("Crypto price fetch failed")
+        err_text = msg.ERROR_FETCH
+        markup = reply_markup or kb_back(NAV_MAIN)
+        if status_msg:
+            try:
+                await status_msg.edit_text(err_text, reply_markup=markup)
+            except Exception:
+                await _bot_send_with_retry(context.bot, chat_id=chat_id, text=err_text, reply_markup=markup)
+        else:
+            await _bot_send_with_retry(context.bot, chat_id=chat_id, text=err_text, reply_markup=markup)
         return
 
     missing = [s for s in STAGE1_SYMBOLS if s not in prices]
     fetched_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     text = msg.crypto_prices_message(prices, fetched_at, stale=stale, missing=missing or None)
-    await context.bot.send_message(
-        chat_id,
-        text,
-        parse_mode="Markdown",
-        reply_markup=reply_markup or crypto_menu_keyboard(),
-    )
+    markup = reply_markup or crypto_menu_keyboard()
+    try:
+        if status_msg:
+            await _bot_edit_with_retry(status_msg, text, reply_markup=markup)
+        else:
+            await _bot_send_with_retry(context.bot, chat_id=chat_id, text=text, reply_markup=markup)
+    except (telegram.error.TimedOut, telegram.error.NetworkError):
+        logger.exception("Crypto prices send timed out")
+        try:
+            if status_msg:
+                await status_msg.edit_text(msg.CRYPTO_TELEGRAM_TIMEOUT, reply_markup=markup)
+            else:
+                await _bot_send_with_retry(
+                    context.bot,
+                    chat_id=chat_id,
+                    text=msg.CRYPTO_TELEGRAM_TIMEOUT,
+                    reply_markup=markup,
+                )
+        except Exception:
+            pass
 
 
 async def crypto_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, query=None):
@@ -2384,7 +2413,7 @@ async def crypto_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE, que
     """Refresh crypto prices in place."""
     await query.answer("در حال به‌روزرسانی...")
     try:
-        prices, stale = fetch_current_crypto_prices()
+        prices, stale = await asyncio.to_thread(fetch_current_crypto_prices)
     except Exception:
         await query.edit_message_text(msg.ERROR_FETCH, reply_markup=kb_back(NAV_MAIN))
         return
@@ -2392,7 +2421,10 @@ async def crypto_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE, que
     missing = [s for s in STAGE1_SYMBOLS if s not in prices]
     fetched_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     text = msg.crypto_prices_message(prices, fetched_at, stale=stale, missing=missing or None)
-    await query.edit_message_text(text, parse_mode="Markdown", reply_markup=crypto_menu_keyboard())
+    try:
+        await query.edit_message_text(text, reply_markup=crypto_menu_keyboard())
+    except (telegram.error.TimedOut, telegram.error.NetworkError):
+        await query.edit_message_text(msg.CRYPTO_TELEGRAM_TIMEOUT, reply_markup=crypto_menu_keyboard())
 
 
 async def crypto_chart_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, query):
@@ -4224,7 +4256,20 @@ def determine_verdict(var, buy_thresh, wait_thresh):
 
 # ================= MAIN =================
 def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).post_init(on_startup_train_and_changelog).build()
+    # Longer timeouts for Telegram API when using proxychains / slow networks
+    tg_request = HTTPXRequest(
+        connect_timeout=20.0,
+        read_timeout=60.0,
+        write_timeout=60.0,
+        pool_timeout=60.0,
+    )
+    app = (
+        ApplicationBuilder()
+        .token(BOT_TOKEN)
+        .request(tg_request)
+        .post_init(on_startup_train_and_changelog)
+        .build()
+    )
 
     # Regular commands
     app.add_handler(CommandHandler("start", start))
