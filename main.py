@@ -91,6 +91,7 @@ from changelog import (
     mark_skipped,
 )
 from market_indicators import calculate_market_indicators, trend_label_fa
+from price_outliers import delete_price_outliers, detect_price_outliers, format_outlier_summary
 
 load_dotenv()
 # ================= LOGGING =================
@@ -3171,13 +3172,20 @@ def admin_charts_keyboard():
     ]
     return InlineKeyboardMarkup(keyboard)
 
-def admin_db_keyboard():
+def admin_db_keyboard(*, show_outlier_delete: bool = False):
     """Admin database management keyboard"""
     keyboard = [
+        [InlineKeyboardButton(msg.BTN_DB_OUTLIERS_SCAN, callback_data="db_outliers_scan")],
+    ]
+    if show_outlier_delete:
+        keyboard.append(
+            [InlineKeyboardButton(msg.BTN_DB_OUTLIERS_DELETE, callback_data="db_outliers_confirm")]
+        )
+    keyboard.extend([
         [InlineKeyboardButton("🗑 پاک کردن تاریخچه قدیمی", callback_data="db_clean_old")],
         [InlineKeyboardButton("📊 اطلاعات دیتابیس", callback_data="db_info")],
         back_row(NAV_ADMIN),
-    ]
+    ])
     return InlineKeyboardMarkup(keyboard)
 
 def admin_export_keyboard():
@@ -3652,6 +3660,52 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         await query.answer(f"✅ {deleted} رکورد پاک شد", show_alert=True)
         await query.answer()
         await admin_callback_handler(update, context)
+    elif query.data == "db_outliers_scan":
+        if not is_admin(query.from_user.id):
+            await query.answer(msg.ERROR_ACCESS_DENIED, show_alert=True)
+            return
+        await query.answer("در حال بررسی…")
+        await query.edit_message_text("⏳ در حال اسکن `price_history`…", parse_mode="Markdown")
+        outliers = await asyncio.to_thread(detect_price_outliers, "gold_bot.db")
+        context.user_data["price_outlier_ids"] = [o.row_id for o in outliers]
+        summary = format_outlier_summary(outliers)
+        if outliers:
+            summary += "\n\nبرای حذف، دکمه **حذف قیمت‌های پرت** را بزنید؛ سپس آموزش مجدد مدل."
+        await query.edit_message_text(
+            summary,
+            parse_mode="Markdown",
+            reply_markup=admin_db_keyboard(show_outlier_delete=bool(outliers)),
+        )
+        await audit_log(
+            context,
+            query.from_user.id,
+            query.from_user.username,
+            "db_outliers_scan",
+            f"found={len(outliers)}",
+        )
+    elif query.data == "db_outliers_confirm":
+        if not is_admin(query.from_user.id):
+            await query.answer(msg.ERROR_ACCESS_DENIED, show_alert=True)
+            return
+        ids = context.user_data.get("price_outlier_ids") or []
+        if not ids:
+            await query.answer("ابتدا «یافتن قیمت‌های پرت» را بزنید.", show_alert=True)
+            return
+        deleted = await asyncio.to_thread(delete_price_outliers, "gold_bot.db", ids)
+        context.user_data.pop("price_outlier_ids", None)
+        await query.edit_message_text(
+            f"✅ **{deleted}** ردیف پرت حذف شد.\n"
+            "برای به‌روز بودن پیش‌بینی، یک بار **آموزش مجدد مدل** را اجرا کنید.",
+            parse_mode="Markdown",
+            reply_markup=admin_db_keyboard(),
+        )
+        await audit_log(
+            context,
+            query.from_user.id,
+            query.from_user.username,
+            "db_outliers_delete",
+            f"deleted={deleted}",
+        )
     elif query.data == "db_info":
         db_size = get_db_size()
         conn = sqlite3.connect('gold_bot.db')
