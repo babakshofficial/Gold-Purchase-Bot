@@ -34,10 +34,24 @@ class TestChangelog(unittest.TestCase):
             self.assertTrue(changelog.has_pending_changes({}))
 
     def test_skip_same_head_suppresses_prompt(self):
-        self.pending_file.write_text("- feature x\n", encoding="utf-8")
-        state = {"last_prompted_sha": "abc", "last_broadcast_sha": ""}
+        state = {
+            "last_changelog_sha": "abc",
+            "last_skipped_sha": "abc",
+            "last_prompted_sha": "abc",
+        }
         with mock.patch.object(changelog, "get_head_sha", return_value="abc"):
             self.assertFalse(changelog.has_pending_changes(state))
+
+    def test_prompted_not_broadcast_new_deploy(self):
+        """Preview at HEAD must not block a later deploy that was never broadcast."""
+        state = {
+            "last_prompted_sha": "09777a4111e3ad7efc845f01f179369918b98fa5",
+            "last_changelog_sha": "5f8cf3f5fcac8bccf69a055431381da59436c720",
+            "last_skipped_sha": "5f8cf3f5fcac8bccf69a055431381da59436c720",
+        }
+        head = "09777a4111e3ad7efc845f01f179369918b98fa5"
+        with mock.patch.object(changelog, "get_head_sha", return_value=head):
+            self.assertTrue(changelog.has_pending_changes(state))
 
     def test_new_head_triggers_prompt(self):
         state = {"last_broadcast_sha": "old", "last_prompted_sha": "old"}

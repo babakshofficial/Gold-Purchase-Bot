@@ -3864,9 +3864,14 @@ async def build_and_store_changelog_draft(application_or_context, *, force: bool
     if not force and not has_pending_changes():
         return None
     ctx = build_change_context()
+    if not force and not ctx["pending"] and not ctx["commits"].strip():
+        return None
     draft = await draft_changelog_text(commits=ctx["commits"], pending=ctx["pending"])
-    if not draft.strip() and force:
-        draft = "✨ بهبودها و به‌روزرسانی‌های اخیر ربات طلا."
+    if not draft.strip():
+        if force:
+            draft = "✨ بهبودها و به‌روزرسانی‌های اخیر ربات طلا."
+        else:
+            return None
     head = ctx["head_sha"] or get_head_sha() or "unknown"
     mark_prompted(head, draft)
     bot_data["changelog_draft"] = draft

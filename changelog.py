@@ -77,7 +77,21 @@ def _run_git(*args: str) -> str:
 
 
 def get_head_sha() -> str:
-    return _run_git("rev-parse", "HEAD")
+    sha = _run_git("rev-parse", "HEAD")
+    if sha:
+        return sha
+    env_sha = os.getenv("DEPLOY_GIT_SHA", "").strip()
+    if env_sha:
+        return env_sha
+    marker = REPO_ROOT / "deploy_sha.txt"
+    if marker.exists():
+        try:
+            text = marker.read_text(encoding="utf-8").strip()
+            if text:
+                return text
+        except OSError:
+            pass
+    return ""
 
 
 def collect_commit_log(since_sha: str | None = None, limit: int = 15) -> str:
@@ -108,24 +122,33 @@ def get_changelog_watermark(state: dict | None = None) -> str:
 
 
 def has_pending_changes(state: dict | None = None) -> bool:
-    """True if there are unbroadcast changes that have not been skipped for this HEAD."""
+    """True if admins should be prompted to broadcast (new notes, new deploy, or unfinished draft)."""
     state = state if state is not None else load_state()
     head = get_head_sha()
     pending = read_pending_notes()
     watermark = get_changelog_watermark(state)
-    last_prompted = state.get("last_prompted_sha") or ""
+    last_broadcast = state.get("last_broadcast_sha") or ""
 
     if pending:
         return True
-    if not head:
+
+    if head and head == last_broadcast:
         return False
-    if head == last_prompted:
+
+    if head and watermark and head == watermark:
         return False
-    if watermark and head == watermark:
-        return False
-    if not watermark:
+
+    if head and watermark and head != watermark:
         return True
-    return head != watermark
+
+    if head and head != last_broadcast:
+        return True
+
+    draft = (state.get("last_draft") or "").strip()
+    if draft and head and head != last_broadcast:
+        return True
+
+    return False
 
 
 def build_change_context(state: dict | None = None) -> dict:
@@ -144,7 +167,7 @@ def build_change_context(state: dict | None = None) -> dict:
 
 
 def _fallback_changelog(commits: str, pending: str) -> str:
-    lines = [" ann به‌روزرسانی ربات طلا:"]
+    lines = ["📢 **به‌روزرسانی ربات طلا:**"]
     if pending:
         for raw in pending.splitlines():
             text = raw.strip().lstrip("-•* ").strip()
