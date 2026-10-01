@@ -88,6 +88,7 @@ from changelog import (
     get_head_sha,
     has_pending_changes,
     load_state,
+    looks_mostly_english,
     mark_broadcast,
     mark_prompted,
     mark_skipped,
@@ -3879,7 +3880,7 @@ async def build_and_store_changelog_draft(application_or_context, *, force: bool
     draft = await draft_changelog_text(commits=commits, pending=pending)
     if not draft.strip():
         saved = (load_state().get("last_draft") or "").strip()
-        if saved:
+        if saved and not looks_mostly_english(saved):
             draft = saved
         elif force or has_pending_changes():
             draft = "✨ بهبودها و به‌روزرسانی‌های اخیر ربات طلا."

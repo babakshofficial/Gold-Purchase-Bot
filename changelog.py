@@ -12,9 +12,9 @@ import httpx
 
 logger = logging.getLogger("gold_bot")
 
+REPO_ROOT = Path(__file__).resolve().parent
 STATE_FILE = REPO_ROOT / "changelog_state.json"
 PENDING_FILE = REPO_ROOT / "changelog_pending.md"
-REPO_ROOT = Path(__file__).resolve().parent
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_OPENROUTER_MODEL = "google/gemini-2.5-flash"
@@ -22,6 +22,26 @@ DEFAULT_OPENROUTER_MODEL = "google/gemini-2.5-flash"
 
 def openrouter_model() -> str:
     return os.getenv("OPENROUTER_MODEL", "").strip() or DEFAULT_OPENROUTER_MODEL
+
+
+PERSIAN_CHANGELOG_SYSTEM = """تو نویسنده اعلامیه به‌روزرسانی برای کاربران یک ربات تلگرام تحلیل طلا هستی.
+خروجی باید فقط فارسی باشد (هیچ جمله یا عنوان انگلیسی ننویس).
+حداکثر ۸ خط، با بولت‌پوینت (•) و ایموجی ملایم.
+قوانین:
+- فقط برای کاربران نهایی؛ بدون مسیر فایل، نام ماژول، API، SHA، git یا جزئیات فنی.
+- یادداشت‌های فارسی Cursor را مبنا قرار بده؛ کامیت‌های انگلیسی را به زبان ساده فارسی بازگو کن.
+- هیچ راز یا توکنی ننویس.
+- فقط متن changelog را برگردان، بدون مقدمهٔ جداگانه."""
+
+
+def looks_mostly_english(text: str) -> bool:
+    """Heuristic: Latin-heavy text is probably not user-facing Persian."""
+    letters = [c for c in text if c.isalpha()]
+    if len(letters) < 8:
+        return False
+    latin = sum(1 for c in letters if ("a" <= c.lower() <= "z"))
+    persian = sum(1 for c in letters if "\u0600" <= c <= "\u06FF")
+    return latin > persian and latin / len(letters) > 0.35
 
 
 def load_state() -> dict:
@@ -174,52 +194,35 @@ def build_change_context(state: dict | None = None) -> dict:
     }
 
 
-def _fallback_changelog(commits: str, pending: str) -> str:
+def _format_pending_bullets(pending: str) -> list[str]:
+    lines: list[str] = []
+    for raw in pending.splitlines():
+        text = raw.strip().lstrip("-•* ").strip()
+        if text:
+            lines.append(f"• {text}")
+    return lines
+
+
+def _static_persian_changelog(commits: str, pending: str) -> str:
+    """Persian-only fallback when LLM is unavailable (never paste English commit subjects)."""
     lines = ["📢 به‌روزرسانی ربات طلا:"]
-    if pending:
-        for raw in pending.splitlines():
-            text = raw.strip().lstrip("-•* ").strip()
-            if text:
-                lines.append(f"• {text}")
-    elif commits:
-        for raw in commits.splitlines()[:12]:
-            # strip short sha
-            parts = raw.split(" ", 1)
-            subject = parts[1] if len(parts) > 1 else raw
-            lines.append(f"• {subject}")
+    bullets = _format_pending_bullets(pending)
+    if bullets:
+        lines.extend(bullets)
     else:
-        lines.append("• بهبودها و رفع اشکال‌های اخیر")
+        commit_lines = [ln for ln in commits.splitlines() if ln.strip()]
+        if commit_lines:
+            n = len(commit_lines)
+            lines.append(f"• نسخه جدید با {n} به‌روزرسانی در تحلیل قیمت و امکانات ربات")
+        lines.append("• بهبود پایداری، دقت قیمت‌ها و تجربه کاربری")
+        lines.append("• رفع اشکالات گزارش‌شده در نسخه قبل")
     return "\n".join(lines)
 
 
-async def draft_changelog_text(commits: str = "", pending: str = "") -> str:
-    """Draft a short Persian user-facing changelog via OpenRouter."""
-    if not commits and not pending:
-        ctx = build_change_context()
-        commits = ctx["commits"]
-        pending = ctx["pending"]
-
+async def _call_openrouter_changelog(user_prompt: str, *, max_tokens: int = 500) -> str:
     api_key = os.getenv("OPENROUTER_API_KEY")
     if not api_key:
-        return _fallback_changelog(commits, pending)
-
-    system_prompt = """تو نویسنده اعلامیه به‌روزرسانی برای کاربران یک ربات تلگرام تحلیل طلا هستی.
-متن را به فارسی ساده، دوستانه و کوتاه بنویس (حداکثر ۸ خط).
-قوانین:
-- فقط برای کاربران نهایی؛ بدون مسیر فایل، نام ماژول، API، SHA یا جزئیات فنی داخلی.
-- از بولت‌پوینت و ایموجی مناسب استفاده کن.
-- روی قابلیت‌های جدید و بهبود تجربه تمرکز کن.
-- هیچ راز یا توکنی ننویس.
-- فقط متن changelog را برگردان، بدون مقدمه اضافه."""
-
-    user_prompt = f"""یادداشت‌های Cursor (ترجیحی):
-{pending or '(ندارد)'}
-
-کامیت‌های گیت:
-{commits or '(ندارد)'}
-
-یک changelog فارسی برای کاربران بنویس."""
-
+        return ""
     try:
         async with httpx.AsyncClient() as client:
             resp = await client.post(
@@ -232,23 +235,69 @@ async def draft_changelog_text(commits: str = "", pending: str = "") -> str:
                 json={
                     "model": openrouter_model(),
                     "messages": [
-                        {"role": "system", "content": system_prompt},
+                        {"role": "system", "content": PERSIAN_CHANGELOG_SYSTEM},
                         {"role": "user", "content": user_prompt},
                     ],
-                    "max_tokens": 500,
-                    "temperature": 0.5,
+                    "max_tokens": max_tokens,
+                    "temperature": 0.4,
                 },
-                timeout=20.0,
+                timeout=25.0,
             )
             resp.raise_for_status()
             data = resp.json()
-            content = (data["choices"][0]["message"]["content"] or "").strip()
-            if content:
-                return content
+            return (data["choices"][0]["message"]["content"] or "").strip()
     except Exception as e:
-        logger.warning("OpenRouter changelog draft failed: %s", e)
+        logger.warning("OpenRouter changelog call failed: %s", e)
+        return ""
 
-    return _fallback_changelog(commits, pending)
+
+async def _persian_changelog_fallback(commits: str, pending: str) -> str:
+    if pending.strip():
+        bullets = _format_pending_bullets(pending)
+        if bullets and not any(looks_mostly_english(b) for b in bullets):
+            return "📢 به‌روزرسانی ربات طلا:\n" + "\n".join(bullets)
+
+    user_prompt = f"""یادداشت‌های تیم (اولویت بالا — همان‌ها را فارسی روان بنویس):
+{pending or '(ندارد)'}
+
+خلاصه تغییرات فنی (فقط برای فهم — در خروجی انگلیسی نیاور):
+{commits or '(ندارد)'}
+
+یک changelog کاملاً فارسی برای کاربران تلگرام بنویس."""
+    translated = await _call_openrouter_changelog(user_prompt)
+    if translated and not looks_mostly_english(translated):
+        return translated
+    return _static_persian_changelog(commits, pending)
+
+
+def _fallback_changelog(commits: str, pending: str) -> str:
+    """Sync fallback (Persian only). Prefer async _persian_changelog_fallback when possible."""
+    return _static_persian_changelog(commits, pending)
+
+
+async def draft_changelog_text(commits: str = "", pending: str = "") -> str:
+    """Draft a short Persian user-facing changelog via OpenRouter."""
+    if not commits and not pending:
+        ctx = build_change_context()
+        commits = ctx["commits"]
+        pending = ctx["pending"]
+
+    user_prompt = f"""یادداشت‌های Cursor (ترجیحی — همان محتوا به فارسی روان):
+{pending or '(ندارد)'}
+
+کامیت‌های گیت (برای فهم؛ در خروجی انگلیسی ننویس):
+{commits or '(ندارد)'}
+
+یک changelog کاملاً فارسی برای کاربران بنویس."""
+
+    content = await _call_openrouter_changelog(user_prompt)
+    if content and not looks_mostly_english(content):
+        return content
+
+    if content and looks_mostly_english(content):
+        logger.info("Changelog LLM returned English; using Persian fallback path")
+
+    return await _persian_changelog_fallback(commits, pending)
 
 
 def mark_prompted(head_sha: str, draft: str) -> None:

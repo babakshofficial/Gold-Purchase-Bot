@@ -61,6 +61,12 @@ class TestChangelog(unittest.TestCase):
     def test_fallback_draft(self):
         text = changelog._fallback_changelog("a1b2c3d Add crypto menu", "- قیمت ارز دیجیتال")
         self.assertIn("ارز", text)
+        self.assertNotIn("Add crypto", text)
+
+    def test_static_fallback_no_english_commits(self):
+        text = changelog._static_persian_changelog("abc123 Fix changelog bug", "")
+        self.assertNotIn("Fix changelog", text)
+        self.assertIn("به‌روزرسانی", text)
 
     def test_mark_broadcast_clears_pending(self):
         self.pending_file.write_text("- note\n", encoding="utf-8")
