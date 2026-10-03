@@ -68,7 +68,12 @@ import numpy as np
 from telegram.helpers import escape_markdown 
 import messages as msg
 from crypto_fetch import fetch_crypto_prices, STAGE1_SYMBOLS, CRYPTO_CHANNEL_USERNAME
-from usd_fetch import USD_CHANNEL_PRIMARY, fetch_usd_toman
+from usd_fetch import (
+    USD_CHANNEL_PRIMARY,
+    fetch_usd_toman,
+    is_plausible_market_prices,
+    is_plausible_usd_toman,
+)
 from predictor import (
     predict_future,
     models_ready,
@@ -488,16 +493,30 @@ def fetch_current_prices():
     try:
         tala, ounce = fetch_and_parse_gold()
         usd_toman = fetch_and_parse_usd()
-        return tala, ounce, usd_toman, False
+        if is_plausible_market_prices(tala, usd_toman, ounce):
+            return tala, ounce, usd_toman, False
+        logger.warning(
+            "Live prices failed sanity check: tala=%s usd=%s ounce=%s",
+            tala,
+            usd_toman,
+            ounce,
+        )
     except Exception:
-        conn = sqlite3.connect('gold_bot.db')
-        c = conn.cursor()
-        c.execute('SELECT tala_price, ounce_price, usd_price FROM price_history ORDER BY timestamp DESC LIMIT 1')
-        latest = c.fetchone()
-        conn.close()
-        if latest:
-            return latest[0], latest[1], latest[2], True
-        raise RuntimeError("No price data available")
+        logger.exception("Live price fetch failed")
+
+    conn = sqlite3.connect("gold_bot.db")
+    c = conn.cursor()
+    c.execute(
+        """SELECT tala_price, ounce_price, usd_price FROM price_history
+           WHERE tala_price IS NOT NULL AND usd_price IS NOT NULL AND ounce_price IS NOT NULL
+           ORDER BY timestamp DESC LIMIT 40"""
+    )
+    for tala, ounce, usd in c.fetchall():
+        if is_plausible_market_prices(tala, usd, ounce):
+            conn.close()
+            return tala, ounce, usd, True
+    conn.close()
+    raise RuntimeError("No plausible price data available")
 
 def _crypto_holdings_value(portfolio, crypto_prices):
     total = 0.0
@@ -996,14 +1015,42 @@ def fetch_and_parse_gold():
     raise RuntimeError(f"Gold price not found in the last {num_msgs_to_check} posts after {MAX_FETCH_ATTEMPTS} attempts.")
 
 
+def _last_plausible_usd_from_db() -> float | None:
+    conn = sqlite3.connect("gold_bot.db")
+    try:
+        c = conn.cursor()
+        c.execute(
+            """SELECT usd_price FROM price_history
+               WHERE usd_price IS NOT NULL
+               ORDER BY timestamp DESC LIMIT 40"""
+        )
+        for (usd,) in c.fetchall():
+            if is_plausible_usd_toman(usd):
+                return float(usd)
+    finally:
+        conn.close()
+    return None
+
+
 def fetch_and_parse_usd():
     """Fetch USD in Toman from @nerkhedular (deal rate), with @tgjucurrency fallback."""
-    return fetch_usd_toman(
-        session=requests_session_with_retries(),
-        max_attempts=MAX_FETCH_ATTEMPTS,
-        timeout=(REQUEST_CONNECT_TIMEOUT, REQUEST_READ_TIMEOUT),
-        backoff_factor=RETRY_BACKOFF_FACTOR,
-    )
+    try:
+        usd = fetch_usd_toman(
+            session=requests_session_with_retries(),
+            max_attempts=MAX_FETCH_ATTEMPTS,
+            timeout=(REQUEST_CONNECT_TIMEOUT, REQUEST_READ_TIMEOUT),
+            backoff_factor=RETRY_BACKOFF_FACTOR,
+        )
+        if is_plausible_usd_toman(usd):
+            return usd
+        logger.warning("Live USD fetch returned implausible %s; trying DB fallback", usd)
+    except Exception as e:
+        logger.warning("Live USD fetch failed: %s", e)
+    fallback = _last_plausible_usd_from_db()
+    if fallback is not None:
+        logger.info("Using last plausible USD from DB: %s Toman", fallback)
+        return fallback
+    raise RuntimeError("No plausible USD price available")
 
 
 def analyze_market(tala, usd_toman, ounce, buy_threshold, wait_threshold):
@@ -1914,26 +1961,18 @@ async def gold_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE, quer
     settings = get_user_settings(user.id)
     try:
         try:
-            tala, ounce = fetch_and_parse_gold()
-            usd_toman = fetch_and_parse_usd()
-            source_note = ""
-            logger.info(f"Fetched fresh  Tala={tala}, Ounce={ounce}, USD={usd_toman}")
-
+            tala, ounce, usd_toman, stale = fetch_current_prices()
+            source_note = msg.STALE_DATA_NOTE if stale else ""
+            logger.info(
+                "Gold analysis prices Tala=%s Ounce=%s USD=%s stale=%s",
+                tala,
+                ounce,
+                usd_toman,
+                stale,
+            )
         except Exception as e:
-            logger.warning(f"Real-time data fetch failed: {e}. Fetching from database.")
-            source_note = msg.STALE_DATA_NOTE
-            conn = sqlite3.connect('gold_bot.db')
-            c = conn.cursor()
-            c.execute('''SELECT tala_price, ounce_price, usd_price FROM price_history ORDER BY timestamp DESC LIMIT 1''')
-            latest_record = c.fetchone()
-            conn.close()
-
-            if latest_record:
-                tala, ounce, usd_toman = latest_record
-                logger.info(f"Using database  Tala={tala}, Ounce={ounce}, USD={usd_toman}")
-            else:
-                logger.error("No data available in database either.")
-                raise RuntimeError(msg.ERROR_NO_DATA)
+            logger.error("No plausible price data for /gold: %s", e)
+            raise RuntimeError(msg.ERROR_NO_DATA) from e
 
         fair, var, verdict, emoji, status = analyze_market(
             tala, usd_toman, ounce,
@@ -4137,6 +4176,17 @@ async def monitor_prices(context: ContextTypes.DEFAULT_TYPE):
     try:
         tala, ounce = fetch_and_parse_gold()
         usd_toman = fetch_and_parse_usd()
+
+        if not is_plausible_market_prices(tala, usd_toman, ounce):
+            fair = usd_toman * ounce / 41.5
+            logger.error(
+                "Monitor skipped: bad inputs tala=%s usd=%s ounce=%s fair=%s",
+                tala,
+                usd_toman,
+                ounce,
+                fair,
+            )
+            return
 
         logger.info(f"Monitor Prices - Fetched Raw Tala: {tala}, Raw USD (Toman): {usd_toman}, Raw Ounce: {ounce}")
         all_users = get_all_users_with_notifications()

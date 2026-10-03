@@ -20,6 +20,16 @@ TGJU_MARKER = "قیمت ارزهای آزاد"
 
 DEFAULT_MESSAGES_TO_SCAN = 10
 
+# Free-market USD in Toman (reject Rial/10 mistakes like 800, USDT-scale, etc.)
+USD_TOMAN_MIN = 50_000
+USD_TOMAN_MAX = 900_000
+OUNCE_USD_MIN = 1_500
+OUNCE_USD_MAX = 8_000
+TALA_TOMAN_MIN = 4_000_000
+TALA_TOMAN_MAX = 50_000_000
+FAIR_TO_TALA_MIN_RATIO = 0.55
+FAIR_TO_TALA_MAX_RATIO = 1.85
+
 
 def normalize(text: str) -> str:
     persian = "۰۱۲۳۴۵۶۷۸۹"
@@ -32,6 +42,36 @@ def normalize(text: str) -> str:
 
 def _parse_toman_amount(raw: str) -> float:
     return float(raw.replace(",", ""))
+
+
+def is_plausible_usd_toman(value: float | None) -> bool:
+    if value is None:
+        return False
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return False
+    return USD_TOMAN_MIN <= v <= USD_TOMAN_MAX
+
+
+def is_plausible_market_prices(tala: float, usd_toman: float, ounce: float) -> bool:
+    """Gold market, USD, and fair = USD×ounce/41.5 must be internally consistent."""
+    if not is_plausible_usd_toman(usd_toman):
+        return False
+    try:
+        tala_f = float(tala)
+        ounce_f = float(ounce)
+    except (TypeError, ValueError):
+        return False
+    if not (TALA_TOMAN_MIN <= tala_f <= TALA_TOMAN_MAX):
+        return False
+    if not (OUNCE_USD_MIN <= ounce_f <= OUNCE_USD_MAX):
+        return False
+    fair = float(usd_toman) * ounce_f / 41.5
+    if fair <= 0:
+        return False
+    ratio = fair / tala_f
+    return FAIR_TO_TALA_MIN_RATIO <= ratio <= FAIR_TO_TALA_MAX_RATIO
 
 
 def parse_nerkhedular_post(text: str) -> float | None:
@@ -112,6 +152,14 @@ def _scan_messages(
         checked += 1
         result = parser(msg_text)
         if result is not None:
+            if not is_plausible_usd_toman(result):
+                logger.warning(
+                    "Skipping implausible USD %s Toman (expected %s–%s)",
+                    result,
+                    USD_TOMAN_MIN,
+                    USD_TOMAN_MAX,
+                )
+                continue
             return result
     return None
 

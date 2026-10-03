@@ -7,7 +7,12 @@ from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
 import re
 import numpy as np # For technical indicators
-from usd_fetch import USD_CHANNEL_FALLBACK, USD_CHANNEL_PRIMARY, fetch_usd_toman
+from usd_fetch import (
+    USD_CHANNEL_FALLBACK,
+    USD_CHANNEL_PRIMARY,
+    fetch_usd_toman,
+    is_plausible_market_prices,
+)
 from market_indicators import calculate_market_indicators
 
 # ================= LOGGING =================
@@ -138,6 +143,17 @@ def main():
             logger.info("Crawler: Fetching data...")
             tala, ounce = fetch_and_parse_gold()
             usd_toman = fetch_and_parse_usd()
+            if not is_plausible_market_prices(tala, usd_toman, ounce):
+                fair_probe = usd_toman * ounce / 41.5
+                logger.error(
+                    "Crawler skipped save: bad tala=%s usd=%s ounce=%s fair=%s",
+                    tala,
+                    usd_toman,
+                    ounce,
+                    fair_probe,
+                )
+                time.sleep(600)
+                continue
             fair_price = usd_toman * ounce / 41.5
             difference = tala - fair_price
             # Fetch recent differences from the database for analysis

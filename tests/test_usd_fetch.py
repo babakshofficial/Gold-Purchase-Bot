@@ -3,6 +3,8 @@
 import unittest
 
 from usd_fetch import (
+    is_plausible_market_prices,
+    is_plausible_usd_toman,
     parse_nerkhedular_post,
     parse_tgjucurrency_post,
     parse_usd_post,
@@ -40,6 +42,16 @@ class TestUsdFetch(unittest.TestCase):
     def test_nerkhedular_buy_only(self):
         text = "💸 دلار فردایی تهران 💵 255,500 خـرید 💸"
         self.assertEqual(parse_nerkhedular_post(text), 255_500.0)
+
+    def test_plausible_usd_rejects_800_toman_mistake(self):
+        self.assertFalse(is_plausible_usd_toman(800))
+        self.assertTrue(is_plausible_usd_toman(254_000))
+
+    def test_market_sanity_rejects_usd_800_with_real_gold(self):
+        tala = 26_122_000
+        ounce = 4133.0
+        self.assertFalse(is_plausible_market_prices(tala, 800, ounce))
+        self.assertTrue(is_plausible_market_prices(tala, 262_000, ounce))
 
 
 if __name__ == "__main__":
