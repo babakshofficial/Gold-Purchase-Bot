@@ -74,6 +74,12 @@ from usd_fetch import (
     is_plausible_market_prices,
     is_plausible_usd_toman,
 )
+from metals_fetch import (
+    METALS_CHANNEL_USERNAME,
+    MetalsPrices,
+    fetch_metals_prices,
+    last_metals_from_db,
+)
 from predictor import (
     predict_future,
     models_ready,
@@ -147,6 +153,8 @@ ASK_PORTFOLIO_BTC = 11
 ASK_PORTFOLIO_ETH = 12
 ASK_PORTFOLIO_TRX = 13
 ASK_PORTFOLIO_USDT = 14
+ASK_PORTFOLIO_SILVER = 18
+ASK_PORTFOLIO_COPPER = 19
 ASK_SETGOAL_GOAL = 15
 ASK_SETGOAL_RISK = 16
 ASK_CHANGELOG_EDIT = 17
@@ -165,6 +173,22 @@ PORTFOLIO_SETUP_STEPS = (
         "portfolio_key": "gold_grams",
         "state": ASK_PORTFOLIO_GOLD,
         "prompt": msg.portfolio_prompt_gold,
+        "parser": float,
+    },
+    {
+        "step_id": "silver",
+        "data_key": "portfolio_silver",
+        "portfolio_key": "silver_grams",
+        "state": ASK_PORTFOLIO_SILVER,
+        "prompt": msg.portfolio_prompt_silver,
+        "parser": float,
+    },
+    {
+        "step_id": "copper",
+        "data_key": "portfolio_copper",
+        "portfolio_key": "copper_kg",
+        "state": ASK_PORTFOLIO_COPPER,
+        "prompt": msg.portfolio_prompt_copper,
         "parser": float,
     },
     {
@@ -228,6 +252,7 @@ NAV_HISTORY = "history_menu"
 NAV_PORTFOLIO = "portfolio"
 NAV_CHARTS = "charts_menu"
 NAV_CRYPTO = "crypto_menu"
+NAV_METALS = "metals_menu"
 NAV_THRESHOLDS = "set_thresholds"
 NAV_ADMIN = "admin_menu"
 NAV_ADMIN_CHARTS = "admin_charts"
@@ -267,6 +292,15 @@ def init_db():
     except sqlite3.OperationalError:
         pass
 
+    c.execute('''CREATE TABLE IF NOT EXISTS metals_price_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        gold_price REAL,
+        silver_price REAL,
+        copper_price REAL,
+        source TEXT
+    )''')
+
     _migrate_users_columns(c)
 
     conn.commit()
@@ -278,6 +312,8 @@ def _migrate_users_columns(c):
         'ALTER TABLE users ADD COLUMN notification_flags INTEGER DEFAULT 1',
         'ALTER TABLE users ADD COLUMN significant_move_threshold INTEGER DEFAULT 700000',
         'ALTER TABLE users ADD COLUMN gold_grams REAL DEFAULT NULL',
+        'ALTER TABLE users ADD COLUMN silver_grams REAL DEFAULT 0',
+        'ALTER TABLE users ADD COLUMN copper_kg REAL DEFAULT 0',
         'ALTER TABLE users ADD COLUMN cash_toman INTEGER DEFAULT 0',
         'ALTER TABLE users ADD COLUMN cash_usd REAL DEFAULT 0',
         'ALTER TABLE users ADD COLUMN crypto_btc REAL DEFAULT 0',
@@ -285,6 +321,8 @@ def _migrate_users_columns(c):
         'ALTER TABLE users ADD COLUMN crypto_trx REAL DEFAULT 0',
         'ALTER TABLE users ADD COLUMN crypto_usdt REAL DEFAULT 0',
         'ALTER TABLE users ADD COLUMN baseline_gold_price INTEGER DEFAULT NULL',
+        'ALTER TABLE users ADD COLUMN baseline_silver_price INTEGER DEFAULT NULL',
+        'ALTER TABLE users ADD COLUMN baseline_copper_price INTEGER DEFAULT NULL',
         'ALTER TABLE users ADD COLUMN baseline_usd_toman REAL DEFAULT NULL',
         'ALTER TABLE users ADD COLUMN baseline_total_toman INTEGER DEFAULT NULL',
         'ALTER TABLE users ADD COLUMN baseline_total_usd REAL DEFAULT NULL',
@@ -396,28 +434,33 @@ def get_users_goal_map():
 def get_user_portfolio(user_id):
     conn = sqlite3.connect('gold_bot.db')
     c = conn.cursor()
-    c.execute('''SELECT gold_grams, cash_toman, cash_usd,
+    c.execute('''SELECT gold_grams, silver_grams, copper_kg, cash_toman, cash_usd,
                         crypto_btc, crypto_eth, crypto_trx, crypto_usdt,
-                        baseline_gold_price, baseline_usd_toman,
-                        baseline_total_toman, baseline_total_usd, portfolio_updated_at
+                        baseline_gold_price, baseline_silver_price, baseline_copper_price,
+                        baseline_usd_toman, baseline_total_toman, baseline_total_usd,
+                        portfolio_updated_at
                  FROM users WHERE user_id = ?''', (user_id,))
     result = c.fetchone()
     conn.close()
-    if not result or result[11] is None:
+    if not result or result[15] is None:
         return None
     return {
         'gold_grams': result[0] or 0.0,
-        'cash_toman': result[1] or 0,
-        'cash_usd': result[2] or 0.0,
-        'crypto_btc': result[3] or 0.0,
-        'crypto_eth': result[4] or 0.0,
-        'crypto_trx': result[5] or 0.0,
-        'crypto_usdt': result[6] or 0.0,
-        'baseline_gold_price': result[7],
-        'baseline_usd_toman': result[8],
-        'baseline_total_toman': result[9],
-        'baseline_total_usd': result[10],
-        'portfolio_updated_at': result[11],
+        'silver_grams': result[1] or 0.0,
+        'copper_kg': result[2] or 0.0,
+        'cash_toman': result[3] or 0,
+        'cash_usd': result[4] or 0.0,
+        'crypto_btc': result[5] or 0.0,
+        'crypto_eth': result[6] or 0.0,
+        'crypto_trx': result[7] or 0.0,
+        'crypto_usdt': result[8] or 0.0,
+        'baseline_gold_price': result[9],
+        'baseline_silver_price': result[10],
+        'baseline_copper_price': result[11],
+        'baseline_usd_toman': result[12],
+        'baseline_total_toman': result[13],
+        'baseline_total_usd': result[14],
+        'portfolio_updated_at': result[15],
     }
 
 def user_has_portfolio(user_id):
@@ -426,6 +469,8 @@ def user_has_portfolio(user_id):
         return False
     return (
         (portfolio['gold_grams'] or 0) > 0
+        or (portfolio['silver_grams'] or 0) > 0
+        or (portfolio['copper_kg'] or 0) > 0
         or (portfolio['cash_toman'] or 0) > 0
         or (portfolio['cash_usd'] or 0) > 0
         or (portfolio['crypto_btc'] or 0) > 0
@@ -437,6 +482,8 @@ def user_has_portfolio(user_id):
 def save_user_portfolio(
     user_id,
     gold_grams,
+    silver_grams,
+    copper_kg,
     cash_toman,
     cash_usd,
     crypto_btc,
@@ -446,9 +493,12 @@ def save_user_portfolio(
     tala_price,
     usd_toman,
     crypto_prices,
+    metals: MetalsPrices | None,
 ):
     portfolio = {
         'gold_grams': gold_grams,
+        'silver_grams': silver_grams,
+        'copper_kg': copper_kg,
         'cash_toman': cash_toman,
         'cash_usd': cash_usd,
         'crypto_btc': crypto_btc,
@@ -456,19 +506,26 @@ def save_user_portfolio(
         'crypto_trx': crypto_trx,
         'crypto_usdt': crypto_usdt,
     }
-    total_toman, total_usd = _portfolio_totals(portfolio, tala_price, usd_toman, crypto_prices)
+    total_toman, total_usd = _portfolio_totals(
+        portfolio, tala_price, usd_toman, crypto_prices, metals
+    )
+    silver_baseline = int(metals.silver_per_gram) if metals else None
+    copper_baseline = int(metals.copper_per_kg) if metals else None
     conn = sqlite3.connect('gold_bot.db')
     c = conn.cursor()
     c.execute('''UPDATE users SET
-                 gold_grams = ?, cash_toman = ?, cash_usd = ?,
+                 gold_grams = ?, silver_grams = ?, copper_kg = ?,
+                 cash_toman = ?, cash_usd = ?,
                  crypto_btc = ?, crypto_eth = ?, crypto_trx = ?, crypto_usdt = ?,
-                 baseline_gold_price = ?, baseline_usd_toman = ?,
+                 baseline_gold_price = ?, baseline_silver_price = ?, baseline_copper_price = ?,
+                 baseline_usd_toman = ?,
                  baseline_total_toman = ?, baseline_total_usd = ?,
                  portfolio_updated_at = CURRENT_TIMESTAMP
                  WHERE user_id = ?''',
-              (gold_grams, cash_toman, cash_usd,
+              (gold_grams, silver_grams, copper_kg, cash_toman, cash_usd,
                crypto_btc, crypto_eth, crypto_trx, crypto_usdt,
-               tala_price, usd_toman, int(total_toman), total_usd, user_id))
+               tala_price, silver_baseline, copper_baseline, usd_toman,
+               int(total_toman), total_usd, user_id))
     conn.commit()
     conn.close()
     return int(total_toman), total_usd
@@ -476,13 +533,14 @@ def save_user_portfolio(
 def get_users_with_portfolio_notifications():
     conn = sqlite3.connect('gold_bot.db')
     c = conn.cursor()
-    c.execute('''SELECT user_id, gold_grams, cash_toman, cash_usd,
+    c.execute('''SELECT user_id, gold_grams, silver_grams, copper_kg, cash_toman, cash_usd,
                         crypto_btc, crypto_eth, crypto_trx, crypto_usdt,
                         baseline_total_toman, baseline_total_usd, notification_flags
                  FROM users
                  WHERE notifications = 1
                  AND portfolio_updated_at IS NOT NULL
-                 AND (gold_grams > 0 OR cash_toman > 0 OR cash_usd > 0
+                 AND (gold_grams > 0 OR silver_grams > 0 OR copper_kg > 0
+                      OR cash_toman > 0 OR cash_usd > 0
                       OR crypto_btc > 0 OR crypto_eth > 0 OR crypto_trx > 0 OR crypto_usdt > 0)''')
     results = c.fetchall()
     conn.close()
@@ -527,18 +585,25 @@ def _crypto_holdings_value(portfolio, crypto_prices):
     return total
 
 
-def _portfolio_totals(portfolio, tala_price, usd_toman, crypto_prices):
+def _portfolio_totals(portfolio, tala_price, usd_toman, crypto_prices, metals=None):
     gold_value = (portfolio.get('gold_grams') or 0) * tala_price
+    silver_value = 0.0
+    copper_value = 0.0
+    if metals:
+        silver_value = (portfolio.get('silver_grams') or 0) * metals.silver_per_gram
+        copper_value = (portfolio.get('copper_kg') or 0) * metals.copper_per_kg
     cash_toman = portfolio.get('cash_toman') or 0
     cash_usd = portfolio.get('cash_usd') or 0
     crypto_value = _crypto_holdings_value(portfolio, crypto_prices or {})
-    total_toman = gold_value + cash_toman + (cash_usd * usd_toman) + crypto_value
+    total_toman = gold_value + silver_value + copper_value + cash_toman + (cash_usd * usd_toman) + crypto_value
     total_usd = total_toman / usd_toman if usd_toman else 0
     return total_toman, total_usd
 
 
-def calculate_portfolio_values(portfolio, tala_price, usd_toman, crypto_prices=None):
-    total_toman, total_usd = _portfolio_totals(portfolio, tala_price, usd_toman, crypto_prices)
+def calculate_portfolio_values(portfolio, tala_price, usd_toman, crypto_prices=None, metals=None):
+    total_toman, total_usd = _portfolio_totals(
+        portfolio, tala_price, usd_toman, crypto_prices, metals
+    )
     baseline_toman = portfolio['baseline_total_toman'] or 0
     baseline_usd = portfolio['baseline_total_usd'] or 0
     pnl_toman = total_toman - baseline_toman
@@ -554,7 +619,7 @@ def calculate_portfolio_values(portfolio, tala_price, usd_toman, crypto_prices=N
 
 
 def fetch_portfolio_market_prices():
-    """Fetch gold/USD and crypto prices for portfolio valuation."""
+    """Fetch gold/USD, crypto, and Zarpay silver/copper prices for portfolio valuation."""
     tala_price, _, usd_toman, gold_stale = fetch_current_prices()
     crypto_prices = {}
     crypto_stale = False
@@ -563,7 +628,68 @@ def fetch_portfolio_market_prices():
     except Exception:
         crypto_prices = get_latest_crypto_prices()
         crypto_stale = bool(crypto_prices)
-    return tala_price, usd_toman, crypto_prices, (gold_stale or crypto_stale)
+    metals = None
+    metals_stale = True
+    try:
+        metals = fetch_metals_prices(
+            session=requests_session_with_retries(),
+            timeout=(REQUEST_CONNECT_TIMEOUT, REQUEST_READ_TIMEOUT),
+            persist=True,
+        )
+        metals_stale = metals.stale
+    except Exception:
+        logger.warning("Live metals fetch failed for portfolio", exc_info=True)
+        metals = last_metals_from_db()
+        metals_stale = metals is None or metals.stale
+    return tala_price, usd_toman, crypto_prices, metals, (gold_stale or crypto_stale or metals_stale)
+
+
+def fetch_metals_for_display() -> tuple[MetalsPrices, bool]:
+    """Metals prices for /metals UI (persist successful live fetch)."""
+    try:
+        metals = fetch_metals_prices(
+            session=requests_session_with_retries(),
+            timeout=(REQUEST_CONNECT_TIMEOUT, REQUEST_READ_TIMEOUT),
+            persist=True,
+        )
+        return metals, metals.stale
+    except Exception:
+        fallback = last_metals_from_db()
+        if fallback:
+            return fallback, True
+        raise
+
+
+def _portfolio_view_message(portfolio, tala_price, usd_toman, crypto_prices, metals, stale):
+    values = calculate_portfolio_values(
+        portfolio, tala_price, usd_toman, crypto_prices, metals
+    )
+    silver_price = metals.silver_per_gram if metals else None
+    copper_price_kg = metals.copper_per_kg if metals else None
+    stale_note = msg.STALE_DATA_NOTE if stale else ""
+    return msg.portfolio_view(
+        gold_grams=portfolio["gold_grams"],
+        silver_grams=portfolio.get("silver_grams") or 0,
+        copper_kg=portfolio.get("copper_kg") or 0,
+        cash_toman=portfolio["cash_toman"],
+        cash_usd=portfolio["cash_usd"],
+        crypto_btc=portfolio["crypto_btc"],
+        crypto_eth=portfolio["crypto_eth"],
+        crypto_trx=portfolio["crypto_trx"],
+        crypto_usdt=portfolio["crypto_usdt"],
+        crypto_prices=crypto_prices,
+        total_toman=values["total_toman"],
+        total_usd=values["total_usd"],
+        pnl_toman=values["pnl_toman"],
+        pnl_usd=values["pnl_usd"],
+        pnl_pct=values["pnl_pct"],
+        tala_price=tala_price,
+        usd_toman=usd_toman,
+        silver_price=silver_price,
+        copper_price_kg=copper_price_kg,
+        updated_at=portfolio.get("portfolio_updated_at"),
+        stale_note=stale_note,
+    )
 
 def update_user_settings(user_id, notifications=None, notification_flags=None, buy_threshold=None, wait_threshold=None, significant_move_threshold=None): 
     conn = sqlite3.connect('gold_bot.db')
@@ -1543,6 +1669,8 @@ def clear_nav_state(context):
 
 def _clear_portfolio_setup_data(context):
     context.user_data.pop('portfolio_gold', None)
+    context.user_data.pop('portfolio_silver', None)
+    context.user_data.pop('portfolio_copper', None)
     context.user_data.pop('portfolio_toman', None)
     context.user_data.pop('portfolio_usd', None)
     context.user_data.pop('portfolio_is_update', None)
@@ -1578,6 +1706,8 @@ def _portfolio_current_for_step(context, step):
 def _portfolio_setup_is_empty(context) -> bool:
     amounts = [
         context.user_data.get('portfolio_gold', 0),
+        context.user_data.get('portfolio_silver', 0),
+        context.user_data.get('portfolio_copper', 0),
         context.user_data.get('portfolio_toman', 0),
         context.user_data.get('portfolio_usd', 0),
         context.user_data.get('portfolio_btc', 0),
@@ -1597,33 +1727,13 @@ async def send_portfolio_view(context: ContextTypes.DEFAULT_TYPE, chat_id: int, 
         )
         return
     try:
-        tala_price, usd_toman, crypto_prices, stale = fetch_portfolio_market_prices()
+        tala_price, usd_toman, crypto_prices, metals, stale = fetch_portfolio_market_prices()
     except Exception:
         await context.bot.send_message(
             chat_id, msg.ERROR_FETCH, parse_mode="Markdown", reply_markup=kb_back(NAV_MAIN)
         )
         return
-    values = calculate_portfolio_values(portfolio, tala_price, usd_toman, crypto_prices)
-    stale_note = msg.STALE_DATA_NOTE if stale else ""
-    text = msg.portfolio_view(
-        gold_grams=portfolio['gold_grams'],
-        cash_toman=portfolio['cash_toman'],
-        cash_usd=portfolio['cash_usd'],
-        crypto_btc=portfolio['crypto_btc'],
-        crypto_eth=portfolio['crypto_eth'],
-        crypto_trx=portfolio['crypto_trx'],
-        crypto_usdt=portfolio['crypto_usdt'],
-        crypto_prices=crypto_prices,
-        total_toman=values['total_toman'],
-        total_usd=values['total_usd'],
-        pnl_toman=values['pnl_toman'],
-        pnl_usd=values['pnl_usd'],
-        pnl_pct=values['pnl_pct'],
-        tala_price=tala_price,
-        usd_toman=usd_toman,
-        updated_at=portfolio['portfolio_updated_at'],
-        stale_note=stale_note,
-    )
+    text = _portfolio_view_message(portfolio, tala_price, usd_toman, crypto_prices, metals, stale)
     await context.bot.send_message(
         chat_id, text, parse_mode="Markdown", reply_markup=portfolio_keyboard()
     )
@@ -1666,6 +1776,8 @@ async def show_menu(context: ContextTypes.DEFAULT_TYPE, chat_id: int, menu_id: s
         )
     elif menu_id == NAV_CRYPTO:
         await send_crypto_prices(context, chat_id)
+    elif menu_id == NAV_METALS:
+        await send_metals_prices(context, chat_id)
     elif menu_id == NAV_ADMIN:
         if is_admin(user.id):
             await context.bot.send_message(
@@ -1775,6 +1887,7 @@ async def open_menu_from_callback(update: Update, context: ContextTypes.DEFAULT_
 def main_menu_keyboard(user_id: int | None = None):
     keyboard = [
         [InlineKeyboardButton(msg.BTN_ANALYSIS, callback_data="gold")],
+        [InlineKeyboardButton(msg.BTN_METALS, callback_data="metals_menu")],
         [InlineKeyboardButton(msg.BTN_ADVISE, callback_data="advise"),
          InlineKeyboardButton(msg.BTN_PREDICT, callback_data="predict")],
         [InlineKeyboardButton(msg.BTN_SETGOAL, callback_data="setgoal")],
@@ -2433,6 +2546,63 @@ async def send_crypto_prices(context: ContextTypes.DEFAULT_TYPE, chat_id: int, r
             pass
 
 
+def metals_menu_keyboard():
+    keyboard = [
+        [InlineKeyboardButton("🔄 به‌روزرسانی قیمت", callback_data="metals_refresh")],
+        back_row(NAV_MAIN),
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+async def send_metals_prices(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    reply_markup=None,
+):
+    markup = reply_markup or metals_menu_keyboard()
+    try:
+        metals, stale = await asyncio.to_thread(fetch_metals_for_display)
+    except Exception:
+        logger.exception("Metals price fetch failed")
+        await _bot_send_with_retry(
+            context.bot,
+            chat_id=chat_id,
+            text=msg.ERROR_FETCH,
+            reply_markup=markup,
+        )
+        return
+    fetched_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    stale_note = msg.STALE_DATA_NOTE if stale else ""
+    text = msg.metals_prices_message(metals, updated_at=fetched_at, stale_note=stale_note)
+    await _bot_send_with_retry(context.bot, chat_id=chat_id, text=text, reply_markup=markup)
+
+
+async def metals_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, query=None):
+    if query:
+        user = query.from_user
+        await query.answer()
+        await delete_message_safe(query.message)
+        chat_id = query.message.chat_id
+    else:
+        user = update.effective_user
+        chat_id = update.message.chat_id
+    add_or_update_user(user.id, user.username, user.first_name)
+    await send_metals_prices(context, chat_id)
+
+
+async def metals_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE, query):
+    await query.answer("در حال به‌روزرسانی...")
+    try:
+        metals, stale = await asyncio.to_thread(fetch_metals_for_display)
+    except Exception:
+        await query.edit_message_text(msg.ERROR_FETCH, reply_markup=metals_menu_keyboard())
+        return
+    fetched_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    stale_note = msg.STALE_DATA_NOTE if stale else ""
+    text = msg.metals_prices_message(metals, updated_at=fetched_at, stale_note=stale_note)
+    await query.edit_message_text(text, reply_markup=metals_menu_keyboard())
+
+
 async def crypto_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, query=None):
     """Open crypto hub with live prices."""
     if query:
@@ -2782,6 +2952,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "gold":
         await gold_analysis(update, context, query)
+    elif query.data == "metals_menu":
+        await metals_menu(update, context, query)
+    elif query.data == "metals_refresh":
+        await metals_refresh(update, context, query)
     elif query.data == "predict":
         await predict_command(update, context, query)
     elif query.data == "advise":
@@ -2852,34 +3026,14 @@ async def portfolio_show(update: Update, context: ContextTypes.DEFAULT_TYPE, que
         return ConversationHandler.END
 
     try:
-        tala_price, usd_toman, crypto_prices, stale = fetch_portfolio_market_prices()
+        tala_price, usd_toman, crypto_prices, metals, stale = fetch_portfolio_market_prices()
     except Exception:
         await context.bot.send_message(
             chat_id, msg.ERROR_FETCH, parse_mode="Markdown", reply_markup=kb_back(NAV_MAIN)
         )
         return ConversationHandler.END
 
-    values = calculate_portfolio_values(portfolio, tala_price, usd_toman, crypto_prices)
-    stale_note = msg.STALE_DATA_NOTE if stale else ""
-    text = msg.portfolio_view(
-        gold_grams=portfolio['gold_grams'],
-        cash_toman=portfolio['cash_toman'],
-        cash_usd=portfolio['cash_usd'],
-        crypto_btc=portfolio['crypto_btc'],
-        crypto_eth=portfolio['crypto_eth'],
-        crypto_trx=portfolio['crypto_trx'],
-        crypto_usdt=portfolio['crypto_usdt'],
-        crypto_prices=crypto_prices,
-        total_toman=values['total_toman'],
-        total_usd=values['total_usd'],
-        pnl_toman=values['pnl_toman'],
-        pnl_usd=values['pnl_usd'],
-        pnl_pct=values['pnl_pct'],
-        tala_price=tala_price,
-        usd_toman=usd_toman,
-        updated_at=portfolio['portfolio_updated_at'],
-        stale_note=stale_note,
-    )
+    text = _portfolio_view_message(portfolio, tala_price, usd_toman, crypto_prices, metals, stale)
     await context.bot.send_message(
         chat_id, text, parse_mode="Markdown", reply_markup=portfolio_keyboard()
     )
@@ -2946,7 +3100,7 @@ async def _portfolio_finish_setup(context, chat_id, user_id):
         return ConversationHandler.END
 
     try:
-        tala_price, usd_toman, crypto_prices, _ = fetch_portfolio_market_prices()
+        tala_price, usd_toman, crypto_prices, metals, _ = fetch_portfolio_market_prices()
     except Exception:
         await context.bot.send_message(chat_id, msg.ERROR_FETCH, reply_markup=kb_back(back_target))
         return ConversationHandler.END
@@ -2954,6 +3108,8 @@ async def _portfolio_finish_setup(context, chat_id, user_id):
     save_user_portfolio(
         user_id,
         context.user_data.get('portfolio_gold', 0),
+        context.user_data.get('portfolio_silver', 0),
+        context.user_data.get('portfolio_copper', 0),
         context.user_data.get('portfolio_toman', 0),
         context.user_data.get('portfolio_usd', 0),
         context.user_data.get('portfolio_btc', 0),
@@ -2963,6 +3119,7 @@ async def _portfolio_finish_setup(context, chat_id, user_id):
         tala_price,
         usd_toman,
         crypto_prices,
+        metals,
     )
     _clear_portfolio_setup_data(context)
 
@@ -2972,27 +3129,9 @@ async def _portfolio_finish_setup(context, chat_id, user_id):
     portfolio = get_user_portfolio(user_id)
     if portfolio and user_has_portfolio(user_id):
         try:
-            tala_price, usd_toman, crypto_prices, stale = fetch_portfolio_market_prices()
-            values = calculate_portfolio_values(portfolio, tala_price, usd_toman, crypto_prices)
-            stale_note = msg.STALE_DATA_NOTE if stale else ""
-            text = msg.portfolio_view(
-                gold_grams=portfolio['gold_grams'],
-                cash_toman=portfolio['cash_toman'],
-                cash_usd=portfolio['cash_usd'],
-                crypto_btc=portfolio['crypto_btc'],
-                crypto_eth=portfolio['crypto_eth'],
-                crypto_trx=portfolio['crypto_trx'],
-                crypto_usdt=portfolio['crypto_usdt'],
-                crypto_prices=crypto_prices,
-                total_toman=values['total_toman'],
-                total_usd=values['total_usd'],
-                pnl_toman=values['pnl_toman'],
-                pnl_usd=values['pnl_usd'],
-                pnl_pct=values['pnl_pct'],
-                tala_price=tala_price,
-                usd_toman=usd_toman,
-                updated_at=portfolio['portfolio_updated_at'],
-                stale_note=stale_note,
+            tala_price, usd_toman, crypto_prices, metals, stale = fetch_portfolio_market_prices()
+            text = _portfolio_view_message(
+                portfolio, tala_price, usd_toman, crypto_prices, metals, stale
             )
             await context.bot.send_message(
                 chat_id, text, parse_mode="Markdown", reply_markup=portfolio_keyboard()
@@ -3034,28 +3173,36 @@ async def portfolio_gold_grams(update: Update, context: ContextTypes.DEFAULT_TYP
     return await _portfolio_handle_amount(update, context, 0)
 
 
-async def portfolio_cash_toman(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def portfolio_silver_grams(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return await _portfolio_handle_amount(update, context, 1)
 
 
-async def portfolio_cash_usd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def portfolio_copper_kg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return await _portfolio_handle_amount(update, context, 2)
 
 
-async def portfolio_crypto_btc(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def portfolio_cash_toman(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return await _portfolio_handle_amount(update, context, 3)
 
 
-async def portfolio_crypto_eth(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def portfolio_cash_usd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return await _portfolio_handle_amount(update, context, 4)
 
 
-async def portfolio_crypto_trx(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def portfolio_crypto_btc(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return await _portfolio_handle_amount(update, context, 5)
 
 
-async def portfolio_crypto_usdt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def portfolio_crypto_eth(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return await _portfolio_handle_amount(update, context, 6)
+
+
+async def portfolio_crypto_trx(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    return await _portfolio_handle_amount(update, context, 7)
+
+
+async def portfolio_crypto_usdt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    return await _portfolio_handle_amount(update, context, 8)
 
 
 async def portfolio_keep_current(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3075,20 +3222,24 @@ async def portfolio_keep_current(update: Update, context: ContextTypes.DEFAULT_T
 async def send_portfolio_daily_report(context: ContextTypes.DEFAULT_TYPE):
     try:
         logger.info("Starting portfolio daily report.")
-        tala_price, usd_toman, crypto_prices, _ = fetch_portfolio_market_prices()
+        tala_price, usd_toman, crypto_prices, metals, _ = fetch_portfolio_market_prices()
         users = get_users_with_portfolio_notifications()
         date_str = datetime.now(TEHRAN_TZ).strftime('%Y-%m-%d')
         success_count = 0
         failed_count = 0
+        silver_price = metals.silver_per_gram if metals else None
+        copper_price_kg = metals.copper_per_kg if metals else None
 
         for row in users:
-            (user_id, gold_grams, cash_toman, cash_usd,
+            (user_id, gold_grams, silver_grams, copper_kg, cash_toman, cash_usd,
              crypto_btc, crypto_eth, crypto_trx, crypto_usdt,
              baseline_toman, baseline_usd, flags) = row
             if not (flags & NOTIF_PORTFOLIO):
                 continue
             portfolio = {
                 'gold_grams': gold_grams or 0,
+                'silver_grams': silver_grams or 0,
+                'copper_kg': copper_kg or 0,
                 'cash_toman': cash_toman or 0,
                 'cash_usd': cash_usd or 0,
                 'crypto_btc': crypto_btc or 0,
@@ -3098,10 +3249,14 @@ async def send_portfolio_daily_report(context: ContextTypes.DEFAULT_TYPE):
                 'baseline_total_toman': baseline_toman,
                 'baseline_total_usd': baseline_usd,
             }
-            values = calculate_portfolio_values(portfolio, tala_price, usd_toman, crypto_prices)
+            values = calculate_portfolio_values(
+                portfolio, tala_price, usd_toman, crypto_prices, metals
+            )
             report = msg.portfolio_daily_report(
                 date_str=date_str,
                 gold_grams=portfolio['gold_grams'],
+                silver_grams=portfolio['silver_grams'],
+                copper_kg=portfolio['copper_kg'],
                 cash_toman=portfolio['cash_toman'],
                 cash_usd=portfolio['cash_usd'],
                 crypto_btc=portfolio['crypto_btc'],
@@ -3115,6 +3270,8 @@ async def send_portfolio_daily_report(context: ContextTypes.DEFAULT_TYPE):
                 pnl_pct=values['pnl_pct'],
                 tala_price=tala_price,
                 usd_toman=usd_toman,
+                silver_price=silver_price,
+                copper_price_kg=copper_price_kg,
             )
             try:
                 await context.bot.send_message(chat_id=user_id, text=report, parse_mode="Markdown")
@@ -3147,30 +3304,57 @@ async def calc_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
         calc_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         try:
-            current_price_per_gram, _ = fetch_and_parse_gold()
-            source = "لحظه‌ای"
+            metals, stale = await asyncio.to_thread(fetch_metals_for_display)
+            source = f"@{METALS_CHANNEL_USERNAME}"
+            stale_note = msg.STALE_DATA_NOTE if stale else ""
+            gold_grams = amount_toman / metals.gold_per_gram
+            silver_grams = amount_toman / metals.silver_per_gram
+            copper_kg = amount_toman / metals.copper_per_kg
+            response = msg.calc_result_multi(
+                calc_time_str,
+                amount_toman,
+                metals.gold_per_gram,
+                gold_grams,
+                metals.silver_per_gram,
+                silver_grams,
+                metals.copper_per_kg,
+                copper_kg,
+                source,
+                stale_note=stale_note,
+            )
         except Exception:
-            logger.warning("Calc: Real-time data fetch failed, using database.")
-            conn = sqlite3.connect('gold_bot.db')
-            c = conn.cursor()
-            c.execute('SELECT tala_price FROM price_history ORDER BY timestamp DESC LIMIT 1')
-            result = c.fetchone()
-            conn.close()
-            if result:
-                current_price_per_gram = result[0]
-                source = "آخرین دادهٔ ذخیره شده"
-            else:
-                raise RuntimeError("هیچ داده‌ای برای محاسبه موجود نیست.")
-
-        grams = amount_toman / current_price_per_gram
-        response = msg.calc_result(calc_time_str, amount_toman, current_price_per_gram, grams, source)
+            logger.warning("Calc: metals fetch failed, falling back to gold-only.")
+            try:
+                current_price_per_gram, _ = fetch_and_parse_gold()
+                source = "لحظه‌ای (فقط طلا)"
+            except Exception:
+                conn = sqlite3.connect('gold_bot.db')
+                c = conn.cursor()
+                c.execute('SELECT tala_price FROM price_history ORDER BY timestamp DESC LIMIT 1')
+                result = c.fetchone()
+                conn.close()
+                if result:
+                    current_price_per_gram = result[0]
+                    source = "آخرین دادهٔ ذخیره شده (فقط طلا)"
+                else:
+                    raise RuntimeError("هیچ داده‌ای برای محاسبه موجود نیست.")
+            grams = amount_toman / current_price_per_gram
+            response = msg.calc_result(
+                calc_time_str, amount_toman, current_price_per_gram, grams, source
+            )
 
         await update.message.reply_text(response, parse_mode="Markdown", reply_markup=kb_back(NAV_MAIN))
         context.user_data.pop('waiting_for_calc', None)
 
-        # Audit log
         try:
-            await audit_log(context, user.id, user.username, f"Calc: {amount_toman:,} Toman -> {grams:.4f} Grams (Source: {source})", f"Calculation successful. Source: {source}")
+            audit_detail = f"Calc: {amount_toman:,} Toman (Source: {source})"
+            await audit_log(
+                context,
+                user.id,
+                user.username,
+                audit_detail,
+                "Calculation successful.",
+            )
         except Exception as e:
             logger.error(f"Failed to log calc_amount for user {user.id}: {e}")
 
@@ -4331,6 +4515,7 @@ def main():
     app.add_handler(CommandHandler("help", lambda u, c: help_menu(u, c)))
     app.add_handler(CommandHandler("about", lambda u, c: about_us(u, c)))
     app.add_handler(CommandHandler("crypto", lambda u, c: crypto_menu(u, c)))
+    app.add_handler(CommandHandler("metals", lambda u, c: metals_menu(u, c)))
 
     setgoal_conv_handler = ConversationHandler(
         entry_points=[
@@ -4360,6 +4545,16 @@ def main():
         states={
             ASK_PORTFOLIO_GOLD: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, portfolio_gold_grams),
+                CallbackQueryHandler(portfolio_keep_current, pattern='^portfolio_keep:'),
+                CallbackQueryHandler(handle_nav_back, pattern='^nav_back:'),
+            ],
+            ASK_PORTFOLIO_SILVER: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, portfolio_silver_grams),
+                CallbackQueryHandler(portfolio_keep_current, pattern='^portfolio_keep:'),
+                CallbackQueryHandler(handle_nav_back, pattern='^nav_back:'),
+            ],
+            ASK_PORTFOLIO_COPPER: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, portfolio_copper_kg),
                 CallbackQueryHandler(portfolio_keep_current, pattern='^portfolio_keep:'),
                 CallbackQueryHandler(handle_nav_back, pattern='^nav_back:'),
             ],

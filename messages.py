@@ -6,6 +6,7 @@ from datetime import datetime
 # ================= BUTTON LABELS =================
 
 BTN_ANALYSIS = "📊 تحلیل بازار"
+BTN_METALS = "🪙 نقره و مس"
 BTN_ADVISE = "🤖 تحلیل هوشمند"
 BTN_PREDICT = "🔮 پیش‌بینی قیمت"
 BTN_SETGOAL = "🎯 تعیین هدف"
@@ -160,9 +161,36 @@ def verdict_alert_sell() -> str:
 # ================= CALC =================
 
 CALC_PROMPT = (
-    "💰 **محاسبه گرم طلا**\n\n"
-    "مبلغی که می‌خواهید به طلا تبدیل کنید را **به تومان** وارد کنید:"
+    "💰 **محاسبه خرید فلزات**\n\n"
+    "مبلغی که می‌خواهید سرمایه‌گذاری کنید را **به تومان** وارد کنید:\n"
+    "معادل طلا، نقره و مس (بر اساس قیمت @Zarpay724) نشان داده می‌شود."
 )
+
+
+def calc_result_multi(
+    calc_time: str,
+    amount_toman: int,
+    gold_price: float,
+    gold_grams: float,
+    silver_price: float,
+    silver_grams: float,
+    copper_price_kg: float,
+    copper_kg: float,
+    source: str,
+    stale_note: str = "",
+) -> str:
+    copper_grams = copper_kg * 1000.0
+    return (
+        "💰 **نتیجه محاسبه**\n"
+        f"🕒 زمان: {calc_time}\n\n"
+        f"📥 مبلغ: {amount_toman:,} تومان\n"
+        f"📡 منبع قیمت: {source}\n\n"
+        f"🥇 **طلا:** {gold_price:,.0f} تومان/گرم → **{gold_grams:.4f}** گرم\n"
+        f"🪙 **نقره:** {silver_price:,.0f} تومان/گرم → **{silver_grams:.4f}** گرم\n"
+        f"🟤 **مس:** {copper_price_kg:,.0f} تومان/کیلو → **{copper_kg:.4f}** کیلو "
+        f"({copper_grams:,.0f} گرم)"
+        f"{stale_note}"
+    )
 
 
 def calc_result(
@@ -454,7 +482,7 @@ def _format_crypto_amount(amount: float) -> str:
 def portfolio_prompt_gold(current: float = 0, show_current: bool = False) -> str:
     current_line = _portfolio_current_line(show_current, f"{current:.2f} گرم")
     return (
-        "💼 **ثبت دارایی — مرحله ۱ از ۷**\n\n"
+        "💼 **ثبت دارایی — مرحله ۱ از ۹**\n\n"
         f"{current_line}"
         "مقدار **طلا** خود را به **گرم** وارد کنید.\n"
         "اگر طلا ندارید، `0` بزنید.\n\n"
@@ -462,10 +490,32 @@ def portfolio_prompt_gold(current: float = 0, show_current: bool = False) -> str
     )
 
 
+def portfolio_prompt_silver(current: float = 0, show_current: bool = False) -> str:
+    current_line = _portfolio_current_line(show_current, f"{current:.2f} گرم")
+    return (
+        "💼 **ثبت دارایی — مرحله ۲ از ۹**\n\n"
+        f"{current_line}"
+        "مقدار **نقره** خود را به **گرم** وارد کنید.\n"
+        "اگر نقره ندارید، `0` بزنید.\n\n"
+        "مثال: `120`"
+    )
+
+
+def portfolio_prompt_copper(current: float = 0, show_current: bool = False) -> str:
+    current_line = _portfolio_current_line(show_current, f"{current:.4f} کیلو")
+    return (
+        "💼 **ثبت دارایی — مرحله ۳ از ۹**\n\n"
+        f"{current_line}"
+        "مقدار **مس** خود را به **کیلوگرم** وارد کنید.\n"
+        "اگر مس ندارید، `0` بزنید.\n\n"
+        "مثال: `2.5`"
+    )
+
+
 def portfolio_prompt_toman(current: int = 0, show_current: bool = False) -> str:
     current_line = _portfolio_current_line(show_current, f"{current:,} تومان")
     return (
-        "💼 **ثبت دارایی — مرحله ۲ از ۷**\n\n"
+        "💼 **ثبت دارایی — مرحله ۴ از ۹**\n\n"
         f"{current_line}"
         "مقدار **نقد تومان** خود را وارد کنید.\n"
         "اگر ندارید، `0` بزنید.\n\n"
@@ -476,7 +526,7 @@ def portfolio_prompt_toman(current: int = 0, show_current: bool = False) -> str:
 def portfolio_prompt_usd(current: float = 0, show_current: bool = False) -> str:
     current_line = _portfolio_current_line(show_current, f"${current:,.2f}")
     return (
-        "💼 **ثبت دارایی — مرحله ۳ از ۷**\n\n"
+        "💼 **ثبت دارایی — مرحله ۵ از ۹**\n\n"
         f"{current_line}"
         "مقدار **دلار نقد** خود را وارد کنید.\n"
         "اگر ندارید، `0` بزنید.\n\n"
@@ -487,7 +537,7 @@ def portfolio_prompt_usd(current: float = 0, show_current: bool = False) -> str:
 def portfolio_prompt_btc(current: float = 0, show_current: bool = False) -> str:
     current_line = _portfolio_current_line(show_current, f"{_format_crypto_amount(current)} BTC")
     return (
-        "💼 **ثبت دارایی — مرحله ۴ از ۷**\n\n"
+        "💼 **ثبت دارایی — مرحله ۶ از ۹**\n\n"
         f"{current_line}"
         "مقدار **بیت‌کوین (BTC)** خود را وارد کنید.\n"
         "اگر ندارید، `0` بزنید.\n\n"
@@ -498,7 +548,7 @@ def portfolio_prompt_btc(current: float = 0, show_current: bool = False) -> str:
 def portfolio_prompt_eth(current: float = 0, show_current: bool = False) -> str:
     current_line = _portfolio_current_line(show_current, f"{_format_crypto_amount(current)} ETH")
     return (
-        "💼 **ثبت دارایی — مرحله ۵ از ۷**\n\n"
+        "💼 **ثبت دارایی — مرحله ۷ از ۹**\n\n"
         f"{current_line}"
         "مقدار **اتریوم (ETH)** خود را وارد کنید.\n"
         "اگر ندارید، `0` بزنید.\n\n"
@@ -509,7 +559,7 @@ def portfolio_prompt_eth(current: float = 0, show_current: bool = False) -> str:
 def portfolio_prompt_trx(current: float = 0, show_current: bool = False) -> str:
     current_line = _portfolio_current_line(show_current, f"{_format_crypto_amount(current)} TRX")
     return (
-        "💼 **ثبت دارایی — مرحله ۶ از ۷**\n\n"
+        "💼 **ثبت دارایی — مرحله ۸ از ۹**\n\n"
         f"{current_line}"
         "مقدار **ترون (TRX)** خود را وارد کنید.\n"
         "اگر ندارید، `0` بزنید.\n\n"
@@ -520,7 +570,7 @@ def portfolio_prompt_trx(current: float = 0, show_current: bool = False) -> str:
 def portfolio_prompt_usdt(current: float = 0, show_current: bool = False) -> str:
     current_line = _portfolio_current_line(show_current, f"{_format_crypto_amount(current)} USDT")
     return (
-        "💼 **ثبت دارایی — مرحله ۷ از ۷**\n\n"
+        "💼 **ثبت دارایی — مرحله ۹ از ۹**\n\n"
         f"{current_line}"
         "مقدار **تتر (USDT)** خود را وارد کنید.\n"
         "اگر ندارید، `0` بزنید.\n\n"
@@ -567,6 +617,8 @@ def _portfolio_crypto_lines(crypto_prices: dict, **amounts: float) -> str:
 
 def portfolio_view(
     gold_grams: float,
+    silver_grams: float,
+    copper_kg: float,
     cash_toman: int,
     cash_usd: float,
     crypto_btc: float,
@@ -581,10 +633,14 @@ def portfolio_view(
     pnl_pct: float,
     tala_price: int,
     usd_toman: float,
+    silver_price: float | None,
+    copper_price_kg: float | None,
     updated_at: str | None,
     stale_note: str = "",
 ) -> str:
     gold_value_toman = gold_grams * tala_price
+    silver_value = (silver_grams * silver_price) if silver_price else 0
+    copper_value = (copper_kg * copper_price_kg) if copper_price_kg else 0
     usd_value_toman = cash_usd * usd_toman
     crypto_lines = _portfolio_crypto_lines(
         crypto_prices,
@@ -593,10 +649,27 @@ def portfolio_view(
         crypto_trx=crypto_trx,
         crypto_usdt=crypto_usdt,
     )
+    silver_line = (
+        f"🪙 نقره: {silver_grams:.2f} گرم — **{silver_value:,.0f}** تومان\n"
+        if silver_grams or silver_price
+        else ""
+    )
+    copper_line = (
+        f"🟤 مس: {copper_kg:.4f} کیلو — **{copper_value:,.0f}** تومان\n"
+        if copper_kg or copper_price_kg
+        else ""
+    )
+    price_footer = ""
+    if silver_price:
+        price_footer += f"🪙 نقره: {silver_price:,.0f} تومان/گرم\n"
+    if copper_price_kg:
+        price_footer += f"🟤 مس: {copper_price_kg:,.0f} تومان/کیلو\n"
     updated_line = f"🕒 ثبت/به‌روزرسانی: {updated_at}\n" if updated_at else ""
     return (
         "💼 **دارایی‌های شما**\n\n"
         f"🥇 طلا: {gold_grams:.2f} گرم — **{gold_value_toman:,.0f}** تومان\n"
+        f"{silver_line}"
+        f"{copper_line}"
         f"💵 نقد (تومان): **{cash_toman:,}** تومان\n"
         f"💲 نقد (دلار): ${cash_usd:,.2f} — **{usd_value_toman:,.0f}** تومان\n"
         f"{crypto_lines}\n\n"
@@ -607,6 +680,7 @@ def portfolio_view(
         f"{_format_pnl(pnl_toman, pnl_pct)}\n"
         f"{_format_pnl(pnl_usd, pnl_pct, '$')}\n\n"
         f"🏷 قیمت طلا: {tala_price:,} تومان/گرم\n"
+        f"{price_footer}"
         f"💵 دلار: {usd_toman:,.0f} تومان\n"
         f"{updated_line}"
         f"{stale_note}"
@@ -617,6 +691,8 @@ def portfolio_view(
 def portfolio_daily_report(
     date_str: str,
     gold_grams: float,
+    silver_grams: float,
+    copper_kg: float,
     cash_toman: int,
     cash_usd: float,
     crypto_btc: float,
@@ -630,8 +706,12 @@ def portfolio_daily_report(
     pnl_pct: float,
     tala_price: int,
     usd_toman: float,
+    silver_price: float | None,
+    copper_price_kg: float | None,
 ) -> str:
     gold_value_toman = gold_grams * tala_price
+    silver_value = (silver_grams * silver_price) if silver_price else 0
+    copper_value = (copper_kg * copper_price_kg) if copper_price_kg else 0
     usd_value_toman = cash_usd * usd_toman
     crypto_lines = _portfolio_crypto_lines(
         crypto_prices,
@@ -640,10 +720,18 @@ def portfolio_daily_report(
         crypto_trx=crypto_trx,
         crypto_usdt=crypto_usdt,
     )
+    price_lines = f"🏷 قیمت طلا: {tala_price:,} تومان/گرم\n"
+    if silver_price:
+        price_lines += f"🪙 نقره: {silver_price:,.0f} تومان/گرم\n"
+    if copper_price_kg:
+        price_lines += f"🟤 مس: {copper_price_kg:,.0f} تومان/کیلو\n"
+    price_lines += f"💵 دلار: {usd_toman:,.0f} تومان"
     return (
         f"📊 **گزارش روزانه دارایی**\n"
         f"📅 {date_str}\n\n"
         f"🥇 طلا: {gold_grams:.2f} گرم — **{gold_value_toman:,.0f}** تومان\n"
+        f"🪙 نقره: {silver_grams:.2f} گرم — **{silver_value:,.0f}** تومان\n"
+        f"🟤 مس: {copper_kg:.4f} کیلو — **{copper_value:,.0f}** تومان\n"
         f"💵 نقد (تومان): **{cash_toman:,}** تومان\n"
         f"💲 نقد (دلار): ${cash_usd:,.2f} — **{usd_value_toman:,.0f}** تومان\n"
         f"{crypto_lines}\n\n"
@@ -652,16 +740,38 @@ def portfolio_daily_report(
         f"🌐 ${total_usd:,.2f}\n\n"
         "**📈 سود/زیان (از زمان ثبت)**\n"
         f"{_format_pnl(pnl_toman, pnl_pct)}\n\n"
-        f"🏷 قیمت طلا: {tala_price:,} تومان/گرم\n"
-        f"💵 دلار: {usd_toman:,.0f} تومان"
+        f"{price_lines}"
     )
 
 
 PORTFOLIO_NOT_SET = (
     "💼 **هنوز دارایی ثبت نکرده‌اید**\n\n"
-    "با `/portfolio` می‌توانید طلا، نقد تومان، دلار و ارزهای دیجیتال "
+    "با `/portfolio` می‌توانید طلا، نقره، مس، نقد تومان، دلار و ارزهای دیجیتال "
     "(BTC، ETH، TRX، USDT) خود را ثبت کنید و هر روز ارزش و سود/زیان را دریافت کنید."
 )
+
+
+def metals_prices_message(
+    metals,
+    *,
+    updated_at: str,
+    stale_note: str = "",
+) -> str:
+    return (
+        "🪙 **قیمت طلا، نقره و مس**\n"
+        f"🕒 {updated_at}\n"
+        f"📡 منبع: @{METALS_CHANNEL_USERNAME}\n\n"
+        f"🥇 طلای ۱۸ عیار: **{metals.gold_per_gram:,.0f}** تومان/گرم\n"
+        f"🪙 نقره: **{metals.silver_per_gram:,.0f}** تومان/گرم\n"
+        f"   └ مثقال: **{metals.silver_per_mesghal:,.0f}** تومان\n"
+        f"🟤 مس: **{metals.copper_per_gram:,.0f}** تومان/گرم\n"
+        f"   └ هر کیلو: **{metals.copper_per_kg:,.0f}** تومان\n"
+        f"{stale_note}\n"
+        "برای محاسبه خرید با `/calc` یا ثبت دارایی با `/portfolio` اقدام کنید."
+    )
+
+
+METALS_CHANNEL_USERNAME = "Zarpay724"
 
 
 # ================= HELP & ABOUT =================
@@ -672,6 +782,7 @@ def help_message() -> str:
         "**دستورات:**\n"
         "/start — شروع و منوی اصلی\n"
         "/gold — تحلیل بازار طلا\n"
+        "/metals — قیمت نقره و مس (زرپی)\n"
         "/predict — پیش‌بینی قیمت (۱/۷/۳۰ روز)\n"
         "/setgoal — تعیین هدف و ریسک‌پذیری\n"
         "/advise — توصیه هوشمند شخصی‌سازی‌شده\n"
