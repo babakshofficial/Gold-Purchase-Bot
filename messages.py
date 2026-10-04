@@ -6,7 +6,6 @@ from datetime import datetime
 # ================= BUTTON LABELS =================
 
 BTN_ANALYSIS = "📊 تحلیل بازار"
-BTN_METALS = "🪙 نقره و مس"
 BTN_ADVISE = "🤖 تحلیل هوشمند"
 BTN_PREDICT = "🔮 پیش‌بینی قیمت"
 BTN_SETGOAL = "🎯 تعیین هدف"
@@ -112,16 +111,30 @@ def gold_analysis_message(
     rsi_str,
     volatility_str,
     verdict: str,
-    source_note: str = "",
+    stale_note: str = "",
     trend_hours: int = 6,
+    silver_per_gram: float | None = None,
+    copper_per_gram: float | None = None,
+    copper_per_kg: float | None = None,
+    silver_per_mesghal: float | None = None,
 ) -> str:
+    metals_lines = ""
+    if silver_per_gram is not None:
+        mesghal = silver_per_mesghal if silver_per_mesghal is not None else silver_per_gram * 4.6083
+        metals_lines += f"🪙 نقره (هر گرم): {silver_per_gram:,.0f} تومان\n"
+        metals_lines += f"   └ مثقال: {mesghal:,.0f} تومان\n"
+    if copper_per_gram is not None and copper_per_kg is not None:
+        metals_lines += f"🟤 مس (هر گرم): {copper_per_gram:,.0f} تومان\n"
+        metals_lines += f"   └ هر کیلو: {copper_per_kg:,.0f} تومان\n"
+
     return (
-        f"{emoji} **تحلیل بازار طلا**{source_note}\n"
+        f"{emoji} **تحلیل بازار**{stale_note}\n"
         f"🕒 زمان: {analysis_time}\n\n"
         "**💰 قیمت‌ها**\n"
-        f"🏷 بازار (هر گرم): {tala:,} تومان\n"
-        f"📊 بازار (مثقال): {int(tala * 4.6):,} تومان\n"
-        f"⚖️ قیمت منصفانه: {int(fair):,} تومان\n"
+        f"🏷 طلا — بازار (هر گرم): {tala:,} تومان\n"
+        f"📊 طلا — بازار (مثقال): {int(tala * 4.6):,} تومان\n"
+        f"{metals_lines}"
+        f"⚖️ قیمت منصفانه (طلا): {int(fair):,} تومان\n"
         f"📉 اختلاف: {int(var):+,} تومان\n"
         f"🫧 حباب: {bubble_percentage:.2f}%\n"
         f"💵 دلار: {usd_toman:,.0f} تومان\n"
@@ -163,7 +176,7 @@ def verdict_alert_sell() -> str:
 CALC_PROMPT = (
     "💰 **محاسبه خرید فلزات**\n\n"
     "مبلغی که می‌خواهید سرمایه‌گذاری کنید را **به تومان** وارد کنید:\n"
-    "معادل طلا، نقره و مس (بر اساس قیمت @Zarpay724) نشان داده می‌شود."
+    "معادل طلا، نقره و مس نشان داده می‌شود."
 )
 
 
@@ -176,15 +189,13 @@ def calc_result_multi(
     silver_grams: float,
     copper_price_kg: float,
     copper_kg: float,
-    source: str,
     stale_note: str = "",
 ) -> str:
     copper_grams = copper_kg * 1000.0
     return (
         "💰 **نتیجه محاسبه**\n"
         f"🕒 زمان: {calc_time}\n\n"
-        f"📥 مبلغ: {amount_toman:,} تومان\n"
-        f"📡 منبع قیمت: {source}\n\n"
+        f"📥 مبلغ: {amount_toman:,} تومان\n\n"
         f"🥇 **طلا:** {gold_price:,.0f} تومان/گرم → **{gold_grams:.4f}** گرم\n"
         f"🪙 **نقره:** {silver_price:,.0f} تومان/گرم → **{silver_grams:.4f}** گرم\n"
         f"🟤 **مس:** {copper_price_kg:,.0f} تومان/کیلو → **{copper_kg:.4f}** کیلو "
@@ -198,13 +209,12 @@ def calc_result(
     amount_toman: int,
     price_per_gram: int,
     grams: float,
-    source: str,
 ) -> str:
     return (
         "💰 **نتیجه محاسبه**\n"
         f"🕒 زمان: {calc_time}\n\n"
         f"📥 مبلغ: {amount_toman:,} تومان\n"
-        f"🏷 قیمت هر گرم ({source}): {price_per_gram:,} تومان\n"
+        f"🏷 قیمت هر گرم: {price_per_gram:,} تومان\n"
         f"⚖️ معادل طلا: **{grams:.4f} گرم**"
     )
 
@@ -286,7 +296,6 @@ def crypto_prices_message(
         usd = entry.get("usd")
         toman = entry.get("toman")
         change = entry.get("change_24h_pct")
-        source = entry.get("source", "")
 
         usd_part = f"💵 \u200e${usd:,.2f}\u200e" if usd is not None else "💵 —"
         toman_part = f"💰 \u200f{_format_toman_short(toman)} تومان\u200f" if toman is not None else "💰 —"
@@ -295,31 +304,12 @@ def crypto_prices_message(
             arrow = "🟢" if change >= 0 else "🔴"
             change_part = f"  {arrow} \u200e{change:+.2f}%\u200e"
 
-        source_note = ""
         lines.append(f"\u200f{emoji} {name} ({symbol}){change_part}")
-        lines.append(f"   {usd_part}  |  {toman_part}{source_note}")
+        lines.append(f"   {usd_part}  |  {toman_part}")
         lines.append("")
 
     if missing:
         lines.append(f"⚠️ داده دریافت نشد: {', '.join(missing)}")
-
-    sources = []
-    for symbol in ("BTC", "ETH", "TRX", "USDT"):
-        entry = prices.get(symbol) or {}
-        src = entry.get("source")
-        if src and src not in sources:
-            sources.append(src)
-    if not sources:
-        sources = ["arz_247"]
-    source_labels = []
-    for src in sources:
-        if src == "CryptoPriceFeed":
-            source_labels.append("@CryptoPriceFeed")
-        elif src == "ecogold_ir":
-            source_labels.append("@ecogold_ir")
-        else:
-            source_labels.append(f"@{src}" if not str(src).startswith("@") else str(src))
-    lines.append("📢 منبع: " + " · ".join(source_labels))
     return "\n".join(lines)
 
 
@@ -751,29 +741,6 @@ PORTFOLIO_NOT_SET = (
 )
 
 
-def metals_prices_message(
-    metals,
-    *,
-    updated_at: str,
-    stale_note: str = "",
-) -> str:
-    return (
-        "🪙 **قیمت طلا، نقره و مس**\n"
-        f"🕒 {updated_at}\n"
-        f"📡 منبع: @{METALS_CHANNEL_USERNAME}\n\n"
-        f"🥇 طلای ۱۸ عیار: **{metals.gold_per_gram:,.0f}** تومان/گرم\n"
-        f"🪙 نقره: **{metals.silver_per_gram:,.0f}** تومان/گرم\n"
-        f"   └ مثقال: **{metals.silver_per_mesghal:,.0f}** تومان\n"
-        f"🟤 مس: **{metals.copper_per_gram:,.0f}** تومان/گرم\n"
-        f"   └ هر کیلو: **{metals.copper_per_kg:,.0f}** تومان\n"
-        f"{stale_note}\n"
-        "برای محاسبه خرید با `/calc` یا ثبت دارایی با `/portfolio` اقدام کنید."
-    )
-
-
-METALS_CHANNEL_USERNAME = "Zarpay724"
-
-
 # ================= HELP & ABOUT =================
 
 def help_message() -> str:
@@ -781,8 +748,7 @@ def help_message() -> str:
         "📚 **راهنمای استفاده**\n\n"
         "**دستورات:**\n"
         "/start — شروع و منوی اصلی\n"
-        "/gold — تحلیل بازار طلا\n"
-        "/metals — قیمت نقره و مس (زرپی)\n"
+        "/gold — تحلیل بازار (طلا، نقره، مس)\n"
         "/predict — پیش‌بینی قیمت (۱/۷/۳۰ روز)\n"
         "/setgoal — تعیین هدف و ریسک‌پذیری\n"
         "/advise — توصیه هوشمند شخصی‌سازی‌شده\n"

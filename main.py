@@ -81,7 +81,6 @@ from usd_fetch import (
     last_plausible_usd_from_db,
 )
 from metals_fetch import (
-    METALS_CHANNEL_USERNAME,
     MetalsPrices,
     fetch_metals_prices,
     last_metals_from_db,
@@ -258,7 +257,6 @@ NAV_HISTORY = "history_menu"
 NAV_PORTFOLIO = "portfolio"
 NAV_CHARTS = "charts_menu"
 NAV_CRYPTO = "crypto_menu"
-NAV_METALS = "metals_menu"
 NAV_THRESHOLDS = "set_thresholds"
 NAV_ADMIN = "admin_menu"
 NAV_ADMIN_CHARTS = "admin_charts"
@@ -651,7 +649,7 @@ def fetch_portfolio_market_prices():
 
 
 def fetch_metals_for_display() -> tuple[MetalsPrices, bool]:
-    """Metals prices for /metals UI (persist successful live fetch)."""
+    """Metals prices for analysis, calc, and portfolio (persist on successful live fetch)."""
     try:
         metals = fetch_metals_prices(
             session=requests_session_with_retries(),
@@ -1746,8 +1744,6 @@ async def show_menu(context: ContextTypes.DEFAULT_TYPE, chat_id: int, menu_id: s
         )
     elif menu_id == NAV_CRYPTO:
         await send_crypto_prices(context, chat_id)
-    elif menu_id == NAV_METALS:
-        await send_metals_prices(context, chat_id)
     elif menu_id == NAV_ADMIN:
         if is_admin(user.id):
             await context.bot.send_message(
@@ -1857,7 +1853,6 @@ async def open_menu_from_callback(update: Update, context: ContextTypes.DEFAULT_
 def main_menu_keyboard(user_id: int | None = None):
     keyboard = [
         [InlineKeyboardButton(msg.BTN_ANALYSIS, callback_data="gold")],
-        [InlineKeyboardButton(msg.BTN_METALS, callback_data="metals_menu")],
         [InlineKeyboardButton(msg.BTN_ADVISE, callback_data="advise"),
          InlineKeyboardButton(msg.BTN_PREDICT, callback_data="predict")],
         [InlineKeyboardButton(msg.BTN_SETGOAL, callback_data="setgoal")],
@@ -2045,7 +2040,6 @@ async def gold_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE, quer
     try:
         try:
             tala, ounce, usd_toman, stale = fetch_current_prices()
-            source_note = msg.STALE_DATA_NOTE if stale else ""
             logger.info(
                 "Gold analysis prices Tala=%s Ounce=%s USD=%s stale=%s",
                 tala,
@@ -2074,6 +2068,24 @@ async def gold_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE, quer
 
         save_price_history(tala, usd_toman, ounce, fair, var)
 
+        silver_per_gram = None
+        copper_per_gram = None
+        copper_per_kg = None
+        silver_per_mesghal = None
+        metals_stale_note = ""
+        try:
+            metals, metals_stale = await asyncio.to_thread(fetch_metals_for_display)
+            silver_per_gram = metals.silver_per_gram
+            copper_per_gram = metals.copper_per_gram
+            copper_per_kg = metals.copper_per_kg
+            silver_per_mesghal = metals.silver_per_mesghal
+            if metals_stale:
+                metals_stale_note = msg.STALE_DATA_NOTE
+        except Exception:
+            logger.warning("Gold analysis: could not load silver/copper prices", exc_info=True)
+
+        stale_note = (msg.STALE_DATA_NOTE if stale else "") + metals_stale_note
+
         response = msg.gold_analysis_message(
             emoji=emoji,
             analysis_time=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
@@ -2087,8 +2099,12 @@ async def gold_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE, quer
             rsi_str=rsi_str,
             volatility_str=volatility_str,
             verdict=verdict,
-            source_note=source_note,
+            stale_note=stale_note,
             trend_hours=TREND_HOURS,
+            silver_per_gram=silver_per_gram,
+            copper_per_gram=copper_per_gram,
+            copper_per_kg=copper_per_kg,
+            silver_per_mesghal=silver_per_mesghal,
         )
 
         if models_ready():
@@ -2107,7 +2123,7 @@ async def gold_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE, quer
         await processing_msg.edit_text(response, parse_mode="Markdown", reply_markup=kb_back(NAV_MAIN))
 
         try:
-            await audit_log(context, user.id, user.username, user_msg, f"Gold analysis: {status}, Trend: {trend_str}, Bubble: {bubble_percentage:.2f}% (Source: {'Fresh' if not source_note else 'Database'})")
+            await audit_log(context, user.id, user.username, user_msg, f"Gold analysis: {status}, Trend: {trend_str}, Bubble: {bubble_percentage:.2f}%")
         except Exception as e:
             logger.error(f"Failed to log gold_analysis for user {user.id}: {e}")
 
@@ -2516,63 +2532,6 @@ async def send_crypto_prices(context: ContextTypes.DEFAULT_TYPE, chat_id: int, r
             pass
 
 
-def metals_menu_keyboard():
-    keyboard = [
-        [InlineKeyboardButton("🔄 به‌روزرسانی قیمت", callback_data="metals_refresh")],
-        back_row(NAV_MAIN),
-    ]
-    return InlineKeyboardMarkup(keyboard)
-
-
-async def send_metals_prices(
-    context: ContextTypes.DEFAULT_TYPE,
-    chat_id: int,
-    reply_markup=None,
-):
-    markup = reply_markup or metals_menu_keyboard()
-    try:
-        metals, stale = await asyncio.to_thread(fetch_metals_for_display)
-    except Exception:
-        logger.exception("Metals price fetch failed")
-        await _bot_send_with_retry(
-            context.bot,
-            chat_id=chat_id,
-            text=msg.ERROR_FETCH,
-            reply_markup=markup,
-        )
-        return
-    fetched_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    stale_note = msg.STALE_DATA_NOTE if stale else ""
-    text = msg.metals_prices_message(metals, updated_at=fetched_at, stale_note=stale_note)
-    await _bot_send_with_retry(context.bot, chat_id=chat_id, text=text, reply_markup=markup)
-
-
-async def metals_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, query=None):
-    if query:
-        user = query.from_user
-        await query.answer()
-        await delete_message_safe(query.message)
-        chat_id = query.message.chat_id
-    else:
-        user = update.effective_user
-        chat_id = update.message.chat_id
-    add_or_update_user(user.id, user.username, user.first_name)
-    await send_metals_prices(context, chat_id)
-
-
-async def metals_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE, query):
-    await query.answer("در حال به‌روزرسانی...")
-    try:
-        metals, stale = await asyncio.to_thread(fetch_metals_for_display)
-    except Exception:
-        await query.edit_message_text(msg.ERROR_FETCH, reply_markup=metals_menu_keyboard())
-        return
-    fetched_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    stale_note = msg.STALE_DATA_NOTE if stale else ""
-    text = msg.metals_prices_message(metals, updated_at=fetched_at, stale_note=stale_note)
-    await query.edit_message_text(text, reply_markup=metals_menu_keyboard())
-
-
 async def crypto_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, query=None):
     """Open crypto hub with live prices."""
     if query:
@@ -2922,10 +2881,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "gold":
         await gold_analysis(update, context, query)
-    elif query.data == "metals_menu":
-        await metals_menu(update, context, query)
-    elif query.data == "metals_refresh":
-        await metals_refresh(update, context, query)
     elif query.data == "predict":
         await predict_command(update, context, query)
     elif query.data == "advise":
@@ -3275,7 +3230,6 @@ async def calc_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         try:
             metals, stale = await asyncio.to_thread(fetch_metals_for_display)
-            source = f"@{METALS_CHANNEL_USERNAME}"
             stale_note = msg.STALE_DATA_NOTE if stale else ""
             gold_grams = amount_toman / metals.gold_per_gram
             silver_grams = amount_toman / metals.silver_per_gram
@@ -3289,14 +3243,12 @@ async def calc_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 silver_grams,
                 metals.copper_per_kg,
                 copper_kg,
-                source,
                 stale_note=stale_note,
             )
         except Exception:
             logger.warning("Calc: metals fetch failed, falling back to gold-only.")
             try:
                 current_price_per_gram, _ = fetch_and_parse_gold()
-                source = "لحظه‌ای (فقط طلا)"
             except Exception:
                 conn = sqlite3.connect('gold_bot.db')
                 c = conn.cursor()
@@ -3305,19 +3257,18 @@ async def calc_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 conn.close()
                 if result:
                     current_price_per_gram = result[0]
-                    source = "آخرین دادهٔ ذخیره شده (فقط طلا)"
                 else:
                     raise RuntimeError("هیچ داده‌ای برای محاسبه موجود نیست.")
             grams = amount_toman / current_price_per_gram
             response = msg.calc_result(
-                calc_time_str, amount_toman, current_price_per_gram, grams, source
+                calc_time_str, amount_toman, current_price_per_gram, grams
             )
 
         await update.message.reply_text(response, parse_mode="Markdown", reply_markup=kb_back(NAV_MAIN))
         context.user_data.pop('waiting_for_calc', None)
 
         try:
-            audit_detail = f"Calc: {amount_toman:,} Toman (Source: {source})"
+            audit_detail = f"Calc: {amount_toman:,} Toman"
             await audit_log(
                 context,
                 user.id,
@@ -4485,7 +4436,6 @@ def main():
     app.add_handler(CommandHandler("help", lambda u, c: help_menu(u, c)))
     app.add_handler(CommandHandler("about", lambda u, c: about_us(u, c)))
     app.add_handler(CommandHandler("crypto", lambda u, c: crypto_menu(u, c)))
-    app.add_handler(CommandHandler("metals", lambda u, c: metals_menu(u, c)))
 
     setgoal_conv_handler = ConversationHandler(
         entry_points=[
