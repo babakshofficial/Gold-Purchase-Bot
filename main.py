@@ -67,12 +67,18 @@ from io import BytesIO
 import numpy as np 
 from telegram.helpers import escape_markdown 
 import messages as msg
-from crypto_fetch import fetch_crypto_prices, STAGE1_SYMBOLS, CRYPTO_CHANNEL_USERNAME
+from crypto_fetch import (
+    CRYPTO_CHANNEL_USERNAME,
+    STAGE1_SYMBOLS,
+    fetch_crypto_prices,
+    save_crypto_price_history,
+)
 from usd_fetch import (
     USD_CHANNEL_PRIMARY,
     fetch_usd_toman,
     is_plausible_market_prices,
     is_plausible_usd_toman,
+    last_plausible_usd_from_db,
 )
 from metals_fetch import (
     METALS_CHANNEL_USERNAME,
@@ -717,29 +723,6 @@ def save_price_history(tala, usd_raw_toman, ounce_raw_usd, fair, diff):
     conn.close()
 
 
-def save_crypto_price_history(prices: dict):
-    """Save a snapshot of crypto prices (one row per symbol)."""
-    if not prices:
-        return
-    conn = sqlite3.connect('gold_bot.db')
-    c = conn.cursor()
-    for symbol, data in prices.items():
-        c.execute(
-            '''INSERT INTO crypto_price_history
-               (symbol, usd_price, toman_price, change_24h_pct, source)
-               VALUES (?, ?, ?, ?, ?)''',
-            (
-                symbol,
-                data.get("usd"),
-                data.get("toman"),
-                data.get("change_24h_pct"),
-                data.get("source"),
-            ),
-        )
-    conn.commit()
-    conn.close()
-
-
 def get_crypto_price_history(symbol: str, start_time: str, end_time: str):
     conn = sqlite3.connect('gold_bot.db')
     c = conn.cursor()
@@ -1142,20 +1125,7 @@ def fetch_and_parse_gold():
 
 
 def _last_plausible_usd_from_db() -> float | None:
-    conn = sqlite3.connect("gold_bot.db")
-    try:
-        c = conn.cursor()
-        c.execute(
-            """SELECT usd_price FROM price_history
-               WHERE usd_price IS NOT NULL
-               ORDER BY timestamp DESC LIMIT 40"""
-        )
-        for (usd,) in c.fetchall():
-            if is_plausible_usd_toman(usd):
-                return float(usd)
-    finally:
-        conn.close()
-    return None
+    return last_plausible_usd_from_db()
 
 
 def fetch_and_parse_usd():

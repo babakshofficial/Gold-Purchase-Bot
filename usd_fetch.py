@@ -14,6 +14,7 @@ USD_CHANNEL_PRIMARY = "nerkhedular"
 USD_CHANNEL_FALLBACK = "tgjucurrency"
 USD_CHANNEL_PRIMARY_URL = f"https://t.me/s/{USD_CHANNEL_PRIMARY}"
 USD_CHANNEL_FALLBACK_URL = f"https://t.me/s/{USD_CHANNEL_FALLBACK}"
+DEFAULT_DB = "gold_bot.db"
 
 NERKHEDULAR_MARKER = "دلار فردایی تهران"
 TGJU_MARKER = "قیمت ارزهای آزاد"
@@ -72,6 +73,25 @@ def is_plausible_market_prices(tala: float, usd_toman: float, ounce: float) -> b
         return False
     ratio = fair / tala_f
     return FAIR_TO_TALA_MIN_RATIO <= ratio <= FAIR_TO_TALA_MAX_RATIO
+
+
+def last_plausible_usd_from_db(db_path: str = DEFAULT_DB) -> float | None:
+    import sqlite3
+
+    conn = sqlite3.connect(db_path)
+    try:
+        c = conn.cursor()
+        c.execute(
+            """SELECT usd_price FROM price_history
+               WHERE usd_price IS NOT NULL
+               ORDER BY timestamp DESC LIMIT 40"""
+        )
+        for (usd,) in c.fetchall():
+            if is_plausible_usd_toman(usd):
+                return float(usd)
+    finally:
+        conn.close()
+    return None
 
 
 def parse_nerkhedular_post(text: str) -> float | None:

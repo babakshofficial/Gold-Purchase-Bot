@@ -288,3 +288,34 @@ def fetch_crypto_prices(usd_toman: float | None = None) -> dict[str, dict[str, A
             logger.warning(f"USDT fallback from ecogold_ir failed: {e}")
 
     return prices
+
+
+DEFAULT_CRYPTO_DB = "gold_bot.db"
+
+
+def save_crypto_price_history(prices: dict, db_path: str = DEFAULT_CRYPTO_DB) -> int:
+    """Save a snapshot of crypto prices (one row per symbol). Returns rows inserted."""
+    if not prices:
+        return 0
+    import sqlite3
+
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+    count = 0
+    for symbol, data in prices.items():
+        c.execute(
+            """INSERT INTO crypto_price_history
+               (symbol, usd_price, toman_price, change_24h_pct, source)
+               VALUES (?, ?, ?, ?, ?)""",
+            (
+                symbol,
+                data.get("usd"),
+                data.get("toman"),
+                data.get("change_24h_pct"),
+                data.get("source"),
+            ),
+        )
+        count += 1
+    conn.commit()
+    conn.close()
+    return count
