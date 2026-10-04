@@ -14,6 +14,7 @@ from usd_fetch import (
     is_plausible_market_prices,
 )
 from market_indicators import calculate_market_indicators
+from metals_fetch import METALS_CHANNEL_USERNAME, fetch_metals_prices
 
 # ================= LOGGING =================
 logging.basicConfig(
@@ -131,10 +132,38 @@ def fetch_and_parse_usd(max_attempts: int = MAX_USD_FETCH_ATTEMPTS):
         backoff_factor=USD_RETRY_BACKOFF_FACTOR,
     )
 
+def crawl_metals_prices():
+    """Fetch @Zarpay724 and append to metals_price_history (independent of gold crawl)."""
+    session = requests.Session()
+    try:
+        metals = fetch_metals_prices(
+            session=session,
+            max_attempts=MAX_USD_FETCH_ATTEMPTS,
+            timeout=REQUEST_TIMEOUT,
+            backoff_factor=USD_RETRY_BACKOFF_FACTOR,
+            persist=True,
+            persist_source="crawler",
+        )
+        logger.info(
+            "Crawler: Metals saved gold=%s silver=%s copper=%s (stale=%s)",
+            metals.gold_per_gram,
+            metals.silver_per_gram,
+            metals.copper_per_gram,
+            metals.stale,
+        )
+        return True
+    except Exception as e:
+        logger.error("Crawler: metals fetch failed: %s", e)
+        return False
+
+
 # ================= MAIN CRAWLER LOOP =================
 def main():
     logger.info(
-        "Crawler service started. USD: @%s (fallback @%s). Fetching every 10 minutes...",
+        "Crawler service started. Gold: @%s | Metals: @%s | USD: @%s (fallback @%s). "
+        "Fetching every 10 minutes...",
+        GOLD_CHANNEL_USERNAME,
+        METALS_CHANNEL_USERNAME,
         USD_CHANNEL_USERNAME,
         USD_CHANNEL_FALLBACK,
     )
@@ -174,6 +203,11 @@ def main():
 
         except Exception as e:
             logger.error(f"Crawler failed: {e}")
+
+        try:
+            crawl_metals_prices()
+        except Exception as e:
+            logger.error("Crawler metals-only pass failed: %s", e)
 
         # Wait for 10 minutes before the next fetch
         time.sleep(600) # 600 seconds = 10 minutes

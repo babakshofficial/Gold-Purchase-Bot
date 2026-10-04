@@ -224,6 +224,7 @@ def fetch_metals_prices(
     backoff_factor: float = 2,
     messages_to_scan: int = DEFAULT_MESSAGES_TO_SCAN,
     persist: bool = True,
+    persist_source: str = "zarpay724",
 ) -> MetalsPrices:
     """Live fetch from @Zarpay724, else last plausible row in metals_price_history."""
     own_session = session is None
@@ -241,7 +242,13 @@ def fetch_metals_prices(
             if triple is not None:
                 gold, silver, copper = triple
                 if persist:
-                    save_metals_price_history(gold, silver, copper, db_path=db_path)
+                    save_metals_price_history(
+                        gold,
+                        silver,
+                        copper,
+                        db_path=db_path,
+                        source=persist_source,
+                    )
                 logger.info(
                     "Metals from @%s: gold=%s silver=%s copper=%s (attempt %s)",
                     METALS_CHANNEL_USERNAME,
