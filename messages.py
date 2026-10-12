@@ -413,9 +413,14 @@ def alert_significant_move(
     tala: int,
     fair: int,
     portfolio_footer: str = "",
+    side: str = "high",
 ) -> str:
+    if side == "low":
+        title = "🔔 **حرکت مهم: طلا ارزان‌تر از قیمت منصفانه است**"
+    else:
+        title = "🔔 **حرکت مهم: طلا گران‌تر از قیمت منصفانه است**"
     return (
-        f"🔔 **حرکت مهم قیمت!**\n"
+        f"{title}\n"
         f"🕒 {analysis_time}\n\n"
         f"📊 اختلاف: {var:,} تومان\n"
         f"🏷 قیمت بازار: {tala:,} تومان\n"
@@ -987,6 +992,7 @@ ADMIN_EXPORT_PREP = "در حال آماده‌سازی..."
 ADMIN_FILE_SENT = "✅ فایل ارسال شد"
 ADMIN_BROADCAST_MENU = "📢 **ارسال پیام همگانی**\nنوع ارسال را انتخاب کنید:"
 ADMIN_BROADCAST_PROMPT = "📢 پیام خود را برای ارسال به همه کاربران وارد کنید:"
+ADMIN_BROADCAST_CONFIRM = "این پیام برای همه کاربران ارسال شود؟"
 
 CHANGELOG_USER_HEADER = "📢 به‌روزرسانی ربات\n\n"
 CHANGELOG_SKIPPED = "⏭ ارسال changelog رد شد. تا تغییر بعدی دوباره نمی‌پرسم."

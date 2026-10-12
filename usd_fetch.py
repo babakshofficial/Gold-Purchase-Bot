@@ -8,6 +8,8 @@ from typing import Callable
 import requests
 from bs4 import BeautifulSoup
 
+from pricing import fair_gold_price, normalize
+
 logger = logging.getLogger("gold_bot")
 
 USD_CHANNEL_PRIMARY = "nerkhedular"
@@ -32,15 +34,6 @@ FAIR_TO_TALA_MIN_RATIO = 0.55
 FAIR_TO_TALA_MAX_RATIO = 1.85
 
 
-def normalize(text: str) -> str:
-    persian = "۰۱۲۳۴۵۶۷۸۹"
-    arabic = "٠١٢٣٤٥٦٧٨٩"
-    for i in range(10):
-        text = text.replace(persian[i], str(i))
-        text = text.replace(arabic[i], str(i))
-    return text.replace("٬", ",").replace("،", ",")
-
-
 def _parse_toman_amount(raw: str) -> float:
     return float(raw.replace(",", ""))
 
@@ -56,7 +49,7 @@ def is_plausible_usd_toman(value: float | None) -> bool:
 
 
 def is_plausible_market_prices(tala: float, usd_toman: float, ounce: float) -> bool:
-    """Gold market, USD, and fair = USD×ounce/41.5 must be internally consistent."""
+    """Gold market, USD, and fair price must be internally consistent."""
     if not is_plausible_usd_toman(usd_toman):
         return False
     try:
@@ -68,17 +61,17 @@ def is_plausible_market_prices(tala: float, usd_toman: float, ounce: float) -> b
         return False
     if not (OUNCE_USD_MIN <= ounce_f <= OUNCE_USD_MAX):
         return False
-    fair = float(usd_toman) * ounce_f / 41.5
+    fair = fair_gold_price(usd_toman, ounce_f)
     if fair <= 0:
         return False
     ratio = fair / tala_f
     return FAIR_TO_TALA_MIN_RATIO <= ratio <= FAIR_TO_TALA_MAX_RATIO
 
 
-def last_plausible_usd_from_db(db_path: str = DEFAULT_DB) -> float | None:
-    import sqlite3
+def last_plausible_usd_from_db(db_path: str | None = None) -> float | None:
+    from db import connect
 
-    conn = sqlite3.connect(db_path)
+    conn = connect(db_path)
     try:
         c = conn.cursor()
         c.execute(

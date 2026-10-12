@@ -1,5 +1,4 @@
 numpy
-schedule
 requests
 matplotlib
 python-dotenv
@@ -10,6 +9,5 @@ python-telegram-bot==21.6
 python-telegram-bot[job-queue]
 httpx
 pandas
-scikit-learn
 xgboost
 joblib

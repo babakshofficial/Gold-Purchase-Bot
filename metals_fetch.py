@@ -9,8 +9,12 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from db import connect
+
 import requests
 from bs4 import BeautifulSoup
+
+from pricing import normalize
 
 logger = logging.getLogger("gold_bot")
 
@@ -27,15 +31,6 @@ COPPER_TOMAN_MIN = 500
 COPPER_TOMAN_MAX = 100_000
 
 MESGHAL_GRAMS = 4.6083
-
-
-def normalize(text: str) -> str:
-    persian = "۰۱۲۳۴۵۶۷۸۹"
-    arabic = "٠١٢٣٤٥٦٧٨٩"
-    for i in range(10):
-        text = text.replace(persian[i], str(i))
-        text = text.replace(arabic[i], str(i))
-    return text.replace("٬", ",").replace("،", ",")
 
 
 def _parse_int_amount(raw: str) -> float:
@@ -176,7 +171,7 @@ def save_metals_price_history(
     db_path: str = DEFAULT_DB,
     source: str = "zarpay724",
 ) -> None:
-    conn = sqlite3.connect(db_path)
+    conn = connect(db_path)
     try:
         c = conn.cursor()
         c.execute(
@@ -191,7 +186,7 @@ def save_metals_price_history(
 
 
 def last_metals_from_db(db_path: str = DEFAULT_DB) -> MetalsPrices | None:
-    conn = sqlite3.connect(db_path)
+    conn = connect(db_path)
     try:
         c = conn.cursor()
         c.execute(

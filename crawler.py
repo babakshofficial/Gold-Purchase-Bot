@@ -1,15 +1,16 @@
 # crawler_service.py
 import logging
-import re
-import sqlite3
 import time
 
 import requests
-from bs4 import BeautifulSoup
 
 from crypto_fetch import CRYPTO_CHANNEL_USERNAME, fetch_crypto_prices, save_crypto_price_history
+from db import connect
+from gold_fetch import fetch_and_parse_gold
 from market_indicators import calculate_market_indicators
 from metals_fetch import METALS_CHANNEL_USERNAME, fetch_metals_prices
+from pricing import fair_gold_price
+from price_store import save_market_snapshot
 from usd_fetch import (
     USD_CHANNEL_FALLBACK,
     USD_CHANNEL_PRIMARY,
@@ -39,32 +40,36 @@ CRAWL_INTERVAL_SEC = 600
 
 # ================= DATABASE HELPERS FOR CRAWLER =================
 def save_price_history_crawler(tala, usd, ounce, fair, diff, rsi, volatility, trend):
-    """Saves price data to the database with 'crawler' source"""
-    conn = sqlite3.connect("gold_bot.db")
-    c = conn.cursor()
-    c.execute(
-        """INSERT INTO price_history
-           (tala_price, usd_price, ounce_price, fair_price, difference, rsi, volatility, trend, source)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'crawler')""",
-        (tala, usd, ounce, fair, diff, rsi, volatility, trend),
+    """Saves price data to the database with 'crawler' source."""
+    save_market_snapshot(
+        tala,
+        usd,
+        ounce,
+        fair,
+        diff,
+        source="crawler",
+        rsi=rsi,
+        volatility=volatility,
+        trend=trend,
     )
-    conn.commit()
-    conn.close()
 
 
 def get_price_history_for_analysis_crawler(hours=TREND_HOURS):
-    conn = sqlite3.connect("gold_bot.db")
-    c = conn.cursor()
-    c.execute(
-        """SELECT timestamp, difference
-           FROM price_history
-           WHERE timestamp >= datetime('now', '-{} hours')
-           AND source = 'crawler'
-           ORDER BY timestamp ASC""".format(hours)
-    )
-    results = c.fetchall()
-    conn.close()
-    return results
+    window = f"-{int(hours)} hours"
+    conn = connect()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            """SELECT timestamp, difference
+               FROM price_history
+               WHERE timestamp >= datetime('now', ?)
+               AND source = 'crawler'
+               ORDER BY timestamp ASC""",
+            (window,),
+        )
+        return cursor.fetchall()
+    finally:
+        conn.close()
 
 
 def calculate_rsi_and_volatility_and_trend_crawler(differences):
@@ -73,45 +78,6 @@ def calculate_rsi_and_volatility_and_trend_crawler(differences):
 
 
 # ================= FETCH HELPERS =================
-def normalize(text: str) -> str:
-    persian = "۰۱۲۳۴۵۶۷۸۹"
-    arabic = "٠١٢٣٤٥٦٧٨٩"
-    for i in range(10):
-        text = text.replace(persian[i], str(i))
-        text = text.replace(arabic[i], str(i))
-    return text.replace("٬", ",").replace("،", ",")
-
-
-def parse_gold_post(text: str):
-    text = normalize(text)
-    tala = re.search(r"طلای\s*18\s*عیار[\s\n]*:\s*([\d,]+)", text)
-    ounce = re.search(r"اونس\s*طلا[\s\n]*:\s*([\d,.]+)", text)
-    if not tala or not ounce:
-        return None
-    return (
-        int(tala.group(1).replace(",", "")),
-        float(ounce.group(1).replace(",", "")),
-    )
-
-
-def fetch_and_parse_gold(max_attempts: int = 10):
-    headers = {"User-Agent": "Mozilla/5.0"}
-    r = requests.get(GOLD_CHANNEL_URL, headers=headers, timeout=REQUEST_TIMEOUT)
-    r.raise_for_status()
-    soup = BeautifulSoup(r.text, "html.parser")
-    msgs = soup.select("div.tgme_widget_message_text")
-    if not msgs:
-        raise RuntimeError("No messages found")
-
-    for i in range(min(max_attempts, len(msgs))):
-        msg_text = msgs[-(i + 1)].get_text("\n", strip=True)
-        result = parse_gold_post(msg_text)
-        if result:
-            return result
-
-    raise ValueError("Gold data not found in recent posts")
-
-
 def fetch_and_parse_usd(max_attempts: int = MAX_FETCH_ATTEMPTS):
     return fetch_usd_toman(
         max_attempts=max_attempts,
@@ -134,7 +100,7 @@ def crawl_gold_market() -> bool:
         tala, ounce = fetch_and_parse_gold()
         usd_toman = fetch_and_parse_usd()
         if not is_plausible_market_prices(tala, usd_toman, ounce):
-            fair_probe = usd_toman * ounce / 41.5
+            fair_probe = fair_gold_price(usd_toman, ounce)
             logger.error(
                 "Crawler gold skipped: bad tala=%s usd=%s ounce=%s fair=%s",
                 tala,
@@ -143,7 +109,7 @@ def crawl_gold_market() -> bool:
                 fair_probe,
             )
             return False
-        fair_price = usd_toman * ounce / 41.5
+        fair_price = fair_gold_price(usd_toman, ounce)
         difference = tala - fair_price
         recent_history = get_price_history_for_analysis_crawler(TREND_HOURS)
         recent_differences = [h[1] for h in recent_history]

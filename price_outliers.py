@@ -7,6 +7,9 @@ import statistics
 from dataclasses import dataclass
 from pathlib import Path
 
+from db import connect
+from pricing import fair_gold_price
+
 DEFAULT_DB = "gold_bot.db"
 
 # Rough physical bounds for Iranian 18k gold bot data (Toman / USD).
@@ -35,7 +38,7 @@ class PriceOutlier:
 
 
 def _fetch_rows(db_path: str) -> list[tuple]:
-    conn = sqlite3.connect(db_path)
+    conn = connect(db_path)
     try:
         c = conn.cursor()
         c.execute(
@@ -65,7 +68,7 @@ def _iqr_bounds(values: list[float], mult: float = IQR_MULTIPLIER) -> tuple[floa
 
 
 def detect_price_outliers(
-    db_path: str = DEFAULT_DB,
+    db_path: str | None = None,
     *,
     iqr_multiplier: float = IQR_MULTIPLIER,
 ) -> list[PriceOutlier]:
@@ -124,7 +127,7 @@ def detect_price_outliers(
             reasons.append("ounce_out_of_range")
 
         if usd_f > 0 and ounce_f > 0:
-            computed_fair = usd_f * ounce_f / 41.5
+            computed_fair = fair_gold_price(usd_f, ounce_f)
             if fair_f > 0:
                 rel = abs(computed_fair - fair_f) / max(computed_fair, 1.0)
                 if rel > FAIR_REL_TOL:
@@ -209,7 +212,7 @@ def format_outlier_summary(outliers: list[PriceOutlier], *, max_lines: int = 8) 
 
 
 def delete_price_outliers(
-    db_path: str = DEFAULT_DB,
+    db_path: str | None = None,
     row_ids: list[int] | None = None,
     *,
     outliers: list[PriceOutlier] | None = None,
@@ -222,7 +225,7 @@ def delete_price_outliers(
     if not row_ids:
         return 0
 
-    conn = sqlite3.connect(db_path)
+    conn = connect(db_path)
     try:
         c = conn.cursor()
         placeholders = ",".join("?" * len(row_ids))
@@ -234,7 +237,7 @@ def delete_price_outliers(
         conn.close()
 
 
-def summarize_for_cli(db_path: str = DEFAULT_DB) -> int:
+def summarize_for_cli(db_path: str | None = None) -> int:
     outliers = detect_price_outliers(db_path)
     print(format_outlier_summary(outliers).replace("**", "").replace("`", ""))
     return len(outliers)

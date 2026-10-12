@@ -8,20 +8,13 @@ import os
 import subprocess
 from pathlib import Path
 
-import httpx
+from llm_client import openrouter_chat, openrouter_model
 
 logger = logging.getLogger("gold_bot")
 
 REPO_ROOT = Path(__file__).resolve().parent
 STATE_FILE = REPO_ROOT / "changelog_state.json"
 PENDING_FILE = REPO_ROOT / "changelog_pending.md"
-
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-DEFAULT_OPENROUTER_MODEL = "google/gemini-2.5-flash"
-
-
-def openrouter_model() -> str:
-    return os.getenv("OPENROUTER_MODEL", "").strip() or DEFAULT_OPENROUTER_MODEL
 
 
 PERSIAN_CHANGELOG_SYSTEM = """تو نویسنده اعلامیه به‌روزرسانی برای کاربران یک ربات تلگرام تحلیل طلا هستی.
@@ -220,35 +213,14 @@ def _static_persian_changelog(commits: str, pending: str) -> str:
 
 
 async def _call_openrouter_changelog(user_prompt: str, *, max_tokens: int = 500) -> str:
-    api_key = os.getenv("OPENROUTER_API_KEY")
-    if not api_key:
-        return ""
-    try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                OPENROUTER_URL,
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "HTTP-Referer": "https://t.me/gold_bot",
-                    "X-Title": "Gold Bot Changelog",
-                },
-                json={
-                    "model": openrouter_model(),
-                    "messages": [
-                        {"role": "system", "content": PERSIAN_CHANGELOG_SYSTEM},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                    "max_tokens": max_tokens,
-                    "temperature": 0.4,
-                },
-                timeout=25.0,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            return (data["choices"][0]["message"]["content"] or "").strip()
-    except Exception as e:
-        logger.warning("OpenRouter changelog call failed: %s", e)
-        return ""
+    return await openrouter_chat(
+        system=PERSIAN_CHANGELOG_SYSTEM,
+        user=user_prompt,
+        max_tokens=max_tokens,
+        temperature=0.4,
+        title="Gold Bot Changelog",
+        timeout=25.0,
+    )
 
 
 async def _persian_changelog_fallback(commits: str, pending: str) -> str:

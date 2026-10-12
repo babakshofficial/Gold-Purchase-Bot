@@ -1,4 +1,3 @@
-import re
 import os
 import pytz
 import logging
@@ -73,6 +72,13 @@ from crypto_fetch import (
     fetch_crypto_prices,
     save_crypto_price_history,
 )
+from db import connect as db_connect
+from db import resolve_db_path
+from gold_fetch import (
+    GOLD_CHANNEL_URL,
+    GOLD_CHANNEL_USERNAME,
+    fetch_and_parse_gold,
+)
 from usd_fetch import (
     USD_CHANNEL_PRIMARY,
     fetch_usd_toman,
@@ -110,6 +116,15 @@ from changelog import (
     mark_prompted,
     mark_skipped,
 )
+from pricing import fair_gold_price
+from alert_policy import (
+    ALERT_COOLDOWN,
+    market_transition,
+    significant_side,
+    significant_transition,
+)
+from price_store import save_market_snapshot
+from signals import analyze_market, determine_verdict
 from market_indicators import calculate_market_indicators, trend_label_fa
 from price_outliers import delete_price_outliers, detect_price_outliers, format_outlier_summary
 
@@ -124,9 +139,7 @@ logger = logging.getLogger("gold_bot")
 
 # ================= CONFIG ==================
 BOT_TOKEN = os.getenv('BOT_TOKEN')
-GOLD_CHANNEL_USERNAME = "ecogold_ir"
 USD_CHANNEL_USERNAME = USD_CHANNEL_PRIMARY
-GOLD_CHANNEL_URL = f"https://t.me/s/{GOLD_CHANNEL_USERNAME}"
 PRIVATE_CHANNEL_ID = os.getenv('PRIVATE_CHANNEL_ID')
 ADMIN_IDS = [int(x) for x in os.getenv('ADMIN_IDS', '').split(',') if x]
 REQUEST_TIMEOUT = 30
@@ -163,6 +176,7 @@ ASK_PORTFOLIO_COPPER = 19
 ASK_SETGOAL_GOAL = 15
 ASK_SETGOAL_RISK = 16
 ASK_CHANGELOG_EDIT = 17
+ASK_BROADCAST_CONFIRM = 18
 
 PORTFOLIO_CRYPTO_KEYS = {
     "BTC": "portfolio_btc",
@@ -266,7 +280,7 @@ NAV_ADMIN_BROADCAST = "admin_broadcast_menu"
 NAV_ADMIN_ML = "admin_ml"
 # ================= DATABASE =================
 def init_db():
-    conn = sqlite3.connect('gold_bot.db')
+    conn = db_connect()
     c = conn.cursor()
     c.execute(f'''CREATE TABLE IF NOT EXISTS users (
         user_id INTEGER PRIMARY KEY,
@@ -333,6 +347,12 @@ def _migrate_users_columns(c):
         'ALTER TABLE users ADD COLUMN portfolio_updated_at TIMESTAMP DEFAULT NULL',
         'ALTER TABLE users ADD COLUMN invest_goal TEXT DEFAULT NULL',
         'ALTER TABLE users ADD COLUMN risk_profile TEXT DEFAULT NULL',
+        'ALTER TABLE users ADD COLUMN alert_market_observed TEXT',
+        'ALTER TABLE users ADD COLUMN alert_market_sent_kind TEXT',
+        'ALTER TABLE users ADD COLUMN alert_market_sent_at TEXT',
+        'ALTER TABLE users ADD COLUMN alert_sig_observed TEXT',
+        'ALTER TABLE users ADD COLUMN alert_sig_sent_side TEXT',
+        'ALTER TABLE users ADD COLUMN alert_sig_sent_at TEXT',
     ]
     for sql in migrations:
         try:
@@ -370,7 +390,7 @@ def _migrate_users_columns(c):
 
 init_db()
 def add_or_update_user(user_id, username, first_name):
-    conn = sqlite3.connect('gold_bot.db')
+    conn = db_connect()
     c = conn.cursor()
     c.execute('SELECT user_id FROM users WHERE user_id = ?', (user_id,))
     exists = c.fetchone()
@@ -385,7 +405,7 @@ def add_or_update_user(user_id, username, first_name):
     conn.close()
 
 def get_user_settings(user_id):
-    conn = sqlite3.connect('gold_bot.db')
+    conn = db_connect()
     c = conn.cursor()
     c.execute(
         'SELECT notifications, notification_flags, buy_threshold, wait_threshold, '
@@ -416,7 +436,7 @@ def get_user_settings(user_id):
 
 
 def save_user_goal_profile(user_id, invest_goal: str, risk_profile: str):
-    conn = sqlite3.connect('gold_bot.db')
+    conn = db_connect()
     c = conn.cursor()
     c.execute(
         'UPDATE users SET invest_goal = ?, risk_profile = ? WHERE user_id = ?',
@@ -427,7 +447,7 @@ def save_user_goal_profile(user_id, invest_goal: str, risk_profile: str):
 
 
 def get_users_goal_map():
-    conn = sqlite3.connect('gold_bot.db')
+    conn = db_connect()
     c = conn.cursor()
     c.execute('SELECT user_id, invest_goal, risk_profile FROM users')
     out = {row[0]: (row[1], row[2]) for row in c.fetchall()}
@@ -436,7 +456,7 @@ def get_users_goal_map():
 
 
 def get_user_portfolio(user_id):
-    conn = sqlite3.connect('gold_bot.db')
+    conn = db_connect()
     c = conn.cursor()
     c.execute('''SELECT gold_grams, silver_grams, copper_kg, cash_toman, cash_usd,
                         crypto_btc, crypto_eth, crypto_trx, crypto_usdt,
@@ -515,7 +535,7 @@ def save_user_portfolio(
     )
     silver_baseline = int(metals.silver_per_gram) if metals else None
     copper_baseline = int(metals.copper_per_kg) if metals else None
-    conn = sqlite3.connect('gold_bot.db')
+    conn = db_connect()
     c = conn.cursor()
     c.execute('''UPDATE users SET
                  gold_grams = ?, silver_grams = ?, copper_kg = ?,
@@ -535,7 +555,7 @@ def save_user_portfolio(
     return int(total_toman), total_usd
 
 def get_users_with_portfolio_notifications():
-    conn = sqlite3.connect('gold_bot.db')
+    conn = db_connect()
     c = conn.cursor()
     c.execute('''SELECT user_id, gold_grams, silver_grams, copper_kg, cash_toman, cash_usd,
                         crypto_btc, crypto_eth, crypto_trx, crypto_usdt,
@@ -566,7 +586,7 @@ def fetch_current_prices():
     except Exception:
         logger.exception("Live price fetch failed")
 
-    conn = sqlite3.connect("gold_bot.db")
+    conn = db_connect()
     c = conn.cursor()
     c.execute(
         """SELECT tala_price, ounce_price, usd_price FROM price_history
@@ -696,7 +716,7 @@ def _portfolio_view_message(portfolio, tala_price, usd_toman, crypto_prices, met
     )
 
 def update_user_settings(user_id, notifications=None, notification_flags=None, buy_threshold=None, wait_threshold=None, significant_move_threshold=None): 
-    conn = sqlite3.connect('gold_bot.db')
+    conn = db_connect()
     c = conn.cursor()
     if notifications is not None:
         c.execute('UPDATE users SET notifications = ? WHERE user_id = ?', (notifications, user_id))
@@ -712,17 +732,19 @@ def update_user_settings(user_id, notifications=None, notification_flags=None, b
     conn.close()
 
 def save_price_history(tala, usd_raw_toman, ounce_raw_usd, fair, diff):
-    """Save price data including raw USD and Ounce prices"""
-    conn = sqlite3.connect('gold_bot.db')
-    c = conn.cursor()
-    c.execute('''INSERT INTO price_history (tala_price, usd_price, ounce_price, fair_price, difference)
-                 VALUES (?, ?, ?, ?, ?)''', (tala, usd_raw_toman, ounce_raw_usd, fair, diff))
-    conn.commit()
-    conn.close()
+    """Save a bot price snapshot, skipping a duplicate of the last few minutes."""
+    save_market_snapshot(
+        tala,
+        usd_raw_toman,
+        ounce_raw_usd,
+        fair,
+        diff,
+        source="bot",
+    )
 
 
 def get_crypto_price_history(symbol: str, start_time: str, end_time: str):
-    conn = sqlite3.connect('gold_bot.db')
+    conn = db_connect()
     c = conn.cursor()
     c.execute(
         '''SELECT timestamp, toman_price, usd_price, change_24h_pct, source
@@ -738,7 +760,7 @@ def get_crypto_price_history(symbol: str, start_time: str, end_time: str):
 
 def get_latest_crypto_prices() -> dict:
     """Latest stored price per symbol."""
-    conn = sqlite3.connect('gold_bot.db')
+    conn = db_connect()
     c = conn.cursor()
     result = {}
     for symbol in STAGE1_SYMBOLS:
@@ -769,7 +791,7 @@ def fetch_current_crypto_prices():
         usd_toman = fetch_and_parse_usd()
     except Exception:
         try:
-            conn = sqlite3.connect('gold_bot.db')
+            conn = db_connect()
             c = conn.cursor()
             c.execute('SELECT usd_price FROM price_history ORDER BY timestamp DESC LIMIT 1')
             row = c.fetchone()
@@ -793,7 +815,7 @@ def fetch_current_crypto_prices():
 
 
 def export_crypto_price_history_to_csv(days=7):
-    conn = sqlite3.connect('gold_bot.db')
+    conn = db_connect()
     c = conn.cursor()
     c.execute(
         '''SELECT timestamp, symbol, usd_price, toman_price, change_24h_pct, source
@@ -811,7 +833,7 @@ def export_crypto_price_history_to_csv(days=7):
 
 def get_price_history(limit=24):
     """Fetch price history - Updated to include raw USD and Ounce"""
-    conn = sqlite3.connect('gold_bot.db')
+    conn = db_connect()
     c = conn.cursor()
     c.execute('''SELECT timestamp, tala_price, usd_price, ounce_price, fair_price, difference
                  FROM price_history ORDER BY timestamp DESC LIMIT ?''', (limit,))
@@ -821,7 +843,7 @@ def get_price_history(limit=24):
 
 def get_difference_series_for_analysis(hours=TREND_HOURS, fallback_limit=30):
     """Recent price gaps (market − fair) for indicator math; any source (bot or crawler)."""
-    conn = sqlite3.connect('gold_bot.db')
+    conn = db_connect()
     c = conn.cursor()
     c.execute(
         '''SELECT difference FROM price_history
@@ -877,7 +899,7 @@ def get_price_history_by_timeframe(start_time, end_time):
     end_str = end_dt.strftime('%Y-%m-%d %H:%M:%S')
 
     logger.info(f"get_price_history_by_timeframe: Querying DB for range (converted) {start_str} to {end_str}")
-    conn = sqlite3.connect('gold_bot.db')
+    conn = db_connect()
     c = conn.cursor()
     c.execute('''SELECT timestamp, tala_price, fair_price, difference
                  FROM price_history
@@ -889,7 +911,7 @@ def get_price_history_by_timeframe(start_time, end_time):
     return results
 
 def get_all_users_with_notifications():
-    conn = sqlite3.connect('gold_bot.db')
+    conn = db_connect()
     c = conn.cursor()
     c.execute('SELECT user_id, notification_flags, buy_threshold, wait_threshold, significant_move_threshold FROM users WHERE notifications = 1')
     results = c.fetchall()
@@ -899,7 +921,7 @@ def get_all_users_with_notifications():
 
 def get_all_user_ids() -> list[int]:
     """All registered Telegram user ids (for changelog / full broadcast)."""
-    conn = sqlite3.connect('gold_bot.db')
+    conn = db_connect()
     try:
         c = conn.cursor()
         c.execute('SELECT user_id FROM users')
@@ -932,7 +954,7 @@ async def broadcast_text_to_users(
     return success, failed
 
 def get_user_count():
-    conn = sqlite3.connect('gold_bot.db')
+    conn = db_connect()
     c = conn.cursor()
     c.execute('SELECT COUNT(*) FROM users')
     count = c.fetchone()[0]
@@ -941,7 +963,7 @@ def get_user_count():
 
 def get_recent_users(days=7):
     """Get users who joined in the last N days"""
-    conn = sqlite3.connect('gold_bot.db')
+    conn = db_connect()
     c = conn.cursor()
     c.execute('''SELECT COUNT(*) FROM users
                  WHERE created_at >= datetime('now', '-' || ? || ' days')''', (days,))
@@ -951,7 +973,7 @@ def get_recent_users(days=7):
 
 def get_active_users(days=7):
     """Get count of users who have used the bot recently (simplified - based on notifications)"""
-    conn = sqlite3.connect('gold_bot.db')
+    conn = db_connect()
     c = conn.cursor()
     c.execute('SELECT COUNT(*) FROM users WHERE notifications = 1')
     count = c.fetchone()[0]
@@ -960,7 +982,7 @@ def get_active_users(days=7):
 
 def get_price_stats():
     """Get price statistics"""
-    conn = sqlite3.connect('gold_bot.db')
+    conn = db_connect()
     c = conn.cursor()
     c.execute('''SELECT tala_price, fair_price, difference, timestamp, source
                  FROM price_history ORDER BY timestamp DESC LIMIT 1''')
@@ -982,7 +1004,7 @@ def get_price_stats():
 
 def export_users_to_csv():
     """Export users to CSV format"""
-    conn = sqlite3.connect('gold_bot.db')
+    conn = db_connect()
     c = conn.cursor()
     c.execute('''SELECT user_id, username, first_name, notifications,
                  buy_threshold, wait_threshold, created_at FROM users''')
@@ -995,7 +1017,7 @@ def export_users_to_csv():
 
 def export_price_history_to_csv(days=7):
     """Export price history to CSV format"""
-    conn = sqlite3.connect('gold_bot.db')
+    conn = db_connect()
     c = conn.cursor()
     c.execute('''SELECT timestamp, tala_price, usd_price, ounce_price, fair_price, difference, source
                  FROM price_history
@@ -1010,7 +1032,7 @@ def export_price_history_to_csv(days=7):
 
 def clear_old_price_history(days=30):
     """Clear price history older than N days"""
-    conn = sqlite3.connect('gold_bot.db')
+    conn = db_connect()
     c = conn.cursor()
     c.execute('''DELETE FROM price_history
                  WHERE timestamp < datetime('now', '-' || ? || ' days')''', (days,))
@@ -1021,22 +1043,14 @@ def clear_old_price_history(days=30):
 
 def get_db_size():
     """Get database file size in MB"""
-    import os
-    if os.path.exists('gold_bot.db'):
-        size_bytes = os.path.getsize('gold_bot.db')
+    path = resolve_db_path()
+    if os.path.exists(path):
+        size_bytes = os.path.getsize(path)
         size_mb = size_bytes / (1024 * 1024)
         return size_mb
     return 0
 
 # ================= HELPERS =================
-def normalize(text: str) -> str:
-    persian = "۰۱۲۳۴۵۶۷۸۹"
-    arabic = "٠١٢٣٤٥٦٧٨٩"
-    for i in range(10):
-        text = text.replace(persian[i], str(i))
-        text = text.replace(arabic[i], str(i))
-    return text.replace("٬", ",").replace("،", ",")
-
 def escape_for_markdown_v2(text: str) -> str:
     if text is None:
         return ""
@@ -1059,68 +1073,6 @@ def fetch_latest_post(url: str, max_attempts: int = 10) -> str:
             return msg_text
 
     return msgs[-1].get_text("\n", strip=True)
-
-def parse_gold_post(text: str):
-    text = normalize(text)
-    tala = re.search(r"طلای\s*18\s*عیار[\s\n]*:\s*([\d,]+)", text)
-    ounce = re.search(r"اونس\s*طلا[\s\n]*:\s*([\d,.]+)", text)
-    if not tala or not ounce:
-        return None
-    return (
-        int(tala.group(1).replace(",", "")),
-        float(ounce.group(1).replace(",", ""))
-    )
-
-def fetch_and_parse_gold():
-    """Fetch gold data from posts titled 'قیمت طلا', trying multiple posts if needed."""
-    headers = {"User-Agent": "Mozilla/5.0"}
-    session = requests_session_with_retries()
-    url = GOLD_CHANNEL_URL
-
-    for attempt in range(MAX_FETCH_ATTEMPTS):
-        try:
-            logger.info(f"Attempt {attempt + 1}/{MAX_FETCH_ATTEMPTS} to fetch Gold data from {url}")
-            r = session.get(url, headers=headers, timeout=(REQUEST_CONNECT_TIMEOUT, REQUEST_READ_TIMEOUT))
-            r.raise_for_status()
-
-            soup = BeautifulSoup(r.text, "html.parser")
-            msgs = soup.select("div.tgme_widget_message_text")
-            if not msgs:
-                raise RuntimeError("No messages found in Gold channel")
-
-            num_msgs_to_check = min(10, len(msgs))
-            for i in range(num_msgs_to_check):
-                msg_text = msgs[-(i+1)].get_text("\n", strip=True)
-                if msg_text and len(msg_text) > 20:  
-                    result = parse_gold_post(msg_text)
-                    if result is not None:
-                        logger.info(f"Successfully parsed Gold data (Tala: {result[0]}, Ounce: {result[1]}) from post #{i+1} (latest being #1), attempt {attempt + 1}.")
-                        return result
-                else:
-                    logger.debug(f"fetch_and_parse_gold: Skipping empty/short message #{i+1}, attempt {attempt + 1}")
-
-            logger.warning(f"Gold price (from a post titled 'قیمت طلا' containing 'قیمت لحظه ای' and 'اونس:') not found in the last {num_msgs_to_check} posts, attempt {attempt + 1}.")
-
-        except requests.exceptions.Timeout as e:
-            logger.warning(f"Request timeout on attempt {attempt + 1} for Gold data: {e}")
-            if attempt == MAX_FETCH_ATTEMPTS - 1: # Last attempt
-                raise requests.exceptions.ReadTimeout(f"Failed to fetch Gold data after {MAX_FETCH_ATTEMPTS} attempts due to timeout.")
-        except requests.exceptions.RequestException as e:
-            logger.warning(f"Request error on attempt {attempt + 1} for Gold data: {e}")
-            if attempt == MAX_FETCH_ATTEMPTS - 1: # Last attempt
-                 raise RuntimeError(f"Failed to fetch Gold data after {MAX_FETCH_ATTEMPTS} attempts: {e}")
-        except Exception as e:
-            logger.error(f"Unexpected error on attempt {attempt + 1} for Gold data: {e}")
-            if attempt == MAX_FETCH_ATTEMPTS - 1: # Last attempt
-                 raise RuntimeError(f"Failed to fetch Gold data after {MAX_FETCH_ATTEMPTS} attempts due to an unexpected error: {e}")
-
-        if attempt < MAX_FETCH_ATTEMPTS - 1:
-            wait_time = RETRY_BACKOFF_FACTOR ** attempt
-            logger.info(f"Waiting {wait_time} seconds before next Gold fetch attempt...")
-            time.sleep(wait_time)
-
-    raise RuntimeError(f"Gold price not found in the last {num_msgs_to_check} posts after {MAX_FETCH_ATTEMPTS} attempts.")
-
 
 def _last_plausible_usd_from_db() -> float | None:
     return last_plausible_usd_from_db()
@@ -1147,28 +1099,17 @@ def fetch_and_parse_usd():
     raise RuntimeError("No plausible USD price available")
 
 
-def analyze_market(tala, usd_toman, ounce, buy_threshold, wait_threshold):
-    """Signal from market−fair difference vs absolute thresholds.
+def fetch_live_gold_usd():
+    """Blocking gold + USD fetch. Call via asyncio.to_thread from handlers."""
+    tala, ounce = fetch_and_parse_gold(
+        max_attempts=MAX_FETCH_ATTEMPTS,
+        timeout=(REQUEST_CONNECT_TIMEOUT, REQUEST_READ_TIMEOUT),
+        backoff_factor=RETRY_BACKOFF_FACTOR,
+        session=requests_session_with_retries(),
+    )
+    usd = fetch_and_parse_usd()
+    return tala, ounce, usd
 
-    BUY  when var <= -buy_threshold
-    SELL when var >= +wait_threshold (sell threshold)
-    HOLD when -buy_threshold < var < wait_threshold
-    """
-    fair_price = usd_toman * ounce / 41.5
-    var = tala - fair_price
-    if var <= -buy_threshold:
-        verdict = msg.verdict_buy()
-        emoji = "🟢"
-        status = "BUY"
-    elif var >= wait_threshold:
-        verdict = msg.verdict_sell()
-        emoji = "🔴"
-        status = "SELL"
-    else:
-        verdict = msg.verdict_wait()
-        emoji = "🟡"
-        status = "HOLD"
-    return fair_price, var, verdict, emoji, status
 
 def generate_price_chart():
     """Generate price comparison chart with Persian labels."""
@@ -1195,7 +1136,7 @@ def generate_price_chart():
 
 def generate_usd_price_chart():
     """Generate USD price chart (in Toman) with Persian labels."""
-    conn = sqlite3.connect('gold_bot.db')
+    conn = db_connect()
     c = conn.cursor()
     c.execute('''SELECT timestamp, usd_price
                  FROM price_history ORDER BY timestamp DESC LIMIT 24''')
@@ -1220,7 +1161,7 @@ def generate_usd_price_chart():
 
 def generate_ounce_price_chart():
     """Generate Ounce price chart (in USD) with Persian labels."""
-    conn = sqlite3.connect('gold_bot.db')
+    conn = db_connect()
     c = conn.cursor()
     c.execute('''SELECT timestamp, ounce_price
                  FROM price_history ORDER BY timestamp DESC LIMIT 24''')
@@ -1270,7 +1211,7 @@ def generate_price_chart_by_timeframe(start_time, end_time):
 def generate_usd_price_chart_by_timeframe(start_time, end_time):
     """Generate USD price chart for a specific time range."""
     logger.info(f"generate_usd_price_chart_by_timeframe: Querying DB for range {start_time} to {end_time}")
-    conn = sqlite3.connect('gold_bot.db')
+    conn = db_connect()
     c = conn.cursor()
     c.execute('''SELECT timestamp, usd_price
                  FROM price_history
@@ -1299,7 +1240,7 @@ def generate_usd_price_chart_by_timeframe(start_time, end_time):
 def generate_ounce_price_chart_by_timeframe(start_time, end_time):
     """Generate Ounce price chart for a specific time range."""
     logger.info(f"generate_ounce_price_chart_by_timeframe: Querying DB for range {start_time} to {end_time}")
-    conn = sqlite3.connect('gold_bot.db')
+    conn = db_connect()
     c = conn.cursor()
     c.execute('''SELECT timestamp, ounce_price
                  FROM price_history
@@ -1349,7 +1290,7 @@ async def send_daily_summary(context: ContextTypes.DEFAULT_TYPE):
         now = datetime.now()
         start_of_period = datetime.combine(now.date() - timedelta(days=1), datetime.min.time())
         end_of_period = datetime.combine(now.date() - timedelta(days=1), datetime.max.time())
-        conn = sqlite3.connect('gold_bot.db')
+        conn = db_connect()
         c = conn.cursor()
         c.execute('''
             SELECT tala_price, timestamp
@@ -1378,7 +1319,7 @@ async def send_daily_summary(context: ContextTypes.DEFAULT_TYPE):
         avg_price = sum(prices) / len(prices)
         total_change = close_price - open_price
         change_percentage = (total_change / open_price) * 100 if open_price != 0 else 0
-        conn = sqlite3.connect('gold_bot.db')
+        conn = db_connect()
         c = conn.cursor()
         c.execute('''
             SELECT fair_price, timestamp
@@ -1394,7 +1335,7 @@ async def send_daily_summary(context: ContextTypes.DEFAULT_TYPE):
         if last_fair_result:
              last_fair_price = last_fair_result[0]
         else:
-            conn = sqlite3.connect('gold_bot.db')
+            conn = db_connect()
             c = conn.cursor()
             c.execute('''
                 SELECT fair_price, timestamp
@@ -1441,7 +1382,7 @@ async def send_daily_summary(context: ContextTypes.DEFAULT_TYPE):
 
 def generate_user_growth_chart(days=30):
     """Generate user growth chart with Persian labels."""
-    conn = sqlite3.connect('gold_bot.db')
+    conn = db_connect()
     c = conn.cursor()
     c.execute('''SELECT DATE(created_at) as date, COUNT(*) as count
                  FROM users
@@ -1695,7 +1636,7 @@ async def send_portfolio_view(context: ContextTypes.DEFAULT_TYPE, chat_id: int, 
         )
         return
     try:
-        tala_price, usd_toman, crypto_prices, metals, stale = fetch_portfolio_market_prices()
+        tala_price, usd_toman, crypto_prices, metals, stale = await asyncio.to_thread(fetch_portfolio_market_prices)
     except Exception:
         await context.bot.send_message(
             chat_id, msg.ERROR_FETCH, parse_mode="Markdown", reply_markup=kb_back(NAV_MAIN)
@@ -1758,7 +1699,7 @@ async def show_menu(context: ContextTypes.DEFAULT_TYPE, chat_id: int, menu_id: s
         )
     elif menu_id == NAV_ADMIN_DB:
         db_size = get_db_size()
-        conn = sqlite3.connect('gold_bot.db')
+        conn = db_connect()
         c = conn.cursor()
         c.execute('SELECT COUNT(*) FROM price_history')
         total_records = c.fetchone()[0]
@@ -2039,7 +1980,7 @@ async def gold_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE, quer
     settings = get_user_settings(user.id)
     try:
         try:
-            tala, ounce, usd_toman, stale = fetch_current_prices()
+            tala, ounce, usd_toman, stale = await asyncio.to_thread(fetch_current_prices)
             logger.info(
                 "Gold analysis prices Tala=%s Ounce=%s USD=%s stale=%s",
                 tala,
@@ -2174,8 +2115,7 @@ async def predict_command(update: Update, context: ContextTypes.DEFAULT_TYPE, qu
     processing = await context.bot.send_message(chat_id, msg.PROCESSING)
     try:
         try:
-            tala, ounce = fetch_and_parse_gold()
-            usd = fetch_and_parse_usd()
+            tala, ounce, usd = await asyncio.to_thread(fetch_live_gold_usd)
         except Exception:
             tala = ounce = usd = None
         prediction = predict_future(live_tala=tala, live_usd=usd, live_ounce=ounce)
@@ -2270,8 +2210,7 @@ async def advise_command(update: Update, context: ContextTypes.DEFAULT_TYPE, que
     processing = await context.bot.send_message(chat_id, msg.PROCESSING)
     try:
         try:
-            tala, ounce = fetch_and_parse_gold()
-            usd = fetch_and_parse_usd()
+            tala, ounce, usd = await asyncio.to_thread(fetch_live_gold_usd)
         except Exception:
             tala = ounce = usd = None
         prediction = predict_future(live_tala=tala, live_usd=usd, live_ounce=ounce)
@@ -2951,7 +2890,7 @@ async def portfolio_show(update: Update, context: ContextTypes.DEFAULT_TYPE, que
         return ConversationHandler.END
 
     try:
-        tala_price, usd_toman, crypto_prices, metals, stale = fetch_portfolio_market_prices()
+        tala_price, usd_toman, crypto_prices, metals, stale = await asyncio.to_thread(fetch_portfolio_market_prices)
     except Exception:
         await context.bot.send_message(
             chat_id, msg.ERROR_FETCH, parse_mode="Markdown", reply_markup=kb_back(NAV_MAIN)
@@ -3025,7 +2964,7 @@ async def _portfolio_finish_setup(context, chat_id, user_id):
         return ConversationHandler.END
 
     try:
-        tala_price, usd_toman, crypto_prices, metals, _ = fetch_portfolio_market_prices()
+        tala_price, usd_toman, crypto_prices, metals, _ = await asyncio.to_thread(fetch_portfolio_market_prices)
     except Exception:
         await context.bot.send_message(chat_id, msg.ERROR_FETCH, reply_markup=kb_back(back_target))
         return ConversationHandler.END
@@ -3054,7 +2993,7 @@ async def _portfolio_finish_setup(context, chat_id, user_id):
     portfolio = get_user_portfolio(user_id)
     if portfolio and user_has_portfolio(user_id):
         try:
-            tala_price, usd_toman, crypto_prices, metals, stale = fetch_portfolio_market_prices()
+            tala_price, usd_toman, crypto_prices, metals, stale = await asyncio.to_thread(fetch_portfolio_market_prices)
             text = _portfolio_view_message(
                 portfolio, tala_price, usd_toman, crypto_prices, metals, stale
             )
@@ -3147,7 +3086,7 @@ async def portfolio_keep_current(update: Update, context: ContextTypes.DEFAULT_T
 async def send_portfolio_daily_report(context: ContextTypes.DEFAULT_TYPE):
     try:
         logger.info("Starting portfolio daily report.")
-        tala_price, usd_toman, crypto_prices, metals, _ = fetch_portfolio_market_prices()
+        tala_price, usd_toman, crypto_prices, metals, _ = await asyncio.to_thread(fetch_portfolio_market_prices)
         users = get_users_with_portfolio_notifications()
         date_str = datetime.now(TEHRAN_TZ).strftime('%Y-%m-%d')
         success_count = 0
@@ -3248,9 +3187,9 @@ async def calc_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             logger.warning("Calc: metals fetch failed, falling back to gold-only.")
             try:
-                current_price_per_gram, _ = fetch_and_parse_gold()
+                current_price_per_gram, _ = await asyncio.to_thread(fetch_and_parse_gold)
             except Exception:
-                conn = sqlite3.connect('gold_bot.db')
+                conn = db_connect()
                 c = conn.cursor()
                 c.execute('SELECT tala_price FROM price_history ORDER BY timestamp DESC LIMIT 1')
                 result = c.fetchone()
@@ -3432,7 +3371,7 @@ async def admin_health_check(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
     health_status = []
     try:
-        conn = sqlite3.connect('gold_bot.db')
+        conn = db_connect()
         c = conn.cursor()
         c.execute('SELECT 1')
         conn.close()
@@ -3441,8 +3380,7 @@ async def admin_health_check(update: Update, context: ContextTypes.DEFAULT_TYPE,
         health_status.append(f"❌ دیتابیس: خطا - {e}")
 
     try:
-        tala, ounce = fetch_and_parse_gold()
-        usd_toman = fetch_and_parse_usd()
+        tala, ounce, usd_toman = await asyncio.to_thread(fetch_live_gold_usd)
         health_status.append(f"✅ جذب داده: موفق (USD: {usd_toman:.0f}, Gold: {tala}, Ounce: {ounce})")
     except Exception as e:
         health_status.append(f"❌ جذب داده: خطا - {e}")
@@ -3450,10 +3388,10 @@ async def admin_health_check(update: Update, context: ContextTypes.DEFAULT_TYPE,
     try:
         usd_for_crypto = None
         try:
-            usd_for_crypto = fetch_and_parse_usd()
+            usd_for_crypto = await asyncio.to_thread(fetch_and_parse_usd)
         except Exception:
-            pass
-        crypto_prices = fetch_crypto_prices(usd_toman=usd_for_crypto)
+            usd_for_crypto = None
+        crypto_prices = await asyncio.to_thread(fetch_crypto_prices, usd_for_crypto)
         crypto_parts = []
         for symbol in STAGE1_SYMBOLS:
             if symbol in crypto_prices:
@@ -3557,7 +3495,7 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_msg = "Command: /stats"
     user_count = get_user_count()
-    conn = sqlite3.connect('gold_bot.db')
+    conn = db_connect()
     c = conn.cursor()
     c.execute('SELECT COUNT(*) FROM users WHERE notifications = 1')
     notif_count = c.fetchone()[0]
@@ -3637,8 +3575,7 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         else:
             await query.edit_message_text(msg.PROCESSING, reply_markup=admin_ml_keyboard())
             try:
-                tala, ounce = fetch_and_parse_gold()
-                usd = fetch_and_parse_usd()
+                tala, ounce, usd = await asyncio.to_thread(fetch_live_gold_usd)
             except Exception:
                 tala = ounce = usd = None
             prediction = predict_future(live_tala=tala, live_usd=usd, live_ounce=ounce)
@@ -3668,10 +3605,10 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
                     {k: v for k, v in metrics.items() if k != "_meta"}
                 )
                 await query.edit_message_text(text, parse_mode="Markdown", reply_markup=admin_ml_keyboard())
-            except Exception as e:
+            except Exception:
                 logger.exception("Admin retrain failed")
                 await query.edit_message_text(
-                    f"{msg.ADMIN_ML_TRAIN_FAIL}\n`{e}`",
+                    msg.ADMIN_ML_TRAIN_FAIL,
                     parse_mode="Markdown",
                     reply_markup=admin_ml_keyboard(),
                 )
@@ -3694,7 +3631,7 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         user_count = get_user_count()
         recent_users = get_recent_users(7)
         active_users = get_active_users(7)
-        conn = sqlite3.connect('gold_bot.db')
+        conn = db_connect()
         c = conn.cursor()
         c.execute('SELECT COUNT(*) FROM users WHERE notifications = 1')
         notif_count = c.fetchone()[0]
@@ -3718,7 +3655,7 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         user_count = get_user_count()
         recent_7d = get_recent_users(7)
         recent_30d = get_recent_users(30)
-        conn = sqlite3.connect('gold_bot.db')
+        conn = db_connect()
         c = conn.cursor()
         c.execute('SELECT COUNT(*) FROM users WHERE notifications = 1')
         notif_on = c.fetchone()[0]
@@ -3887,7 +3824,7 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         )
     elif query.data == "db_info":
         db_size = get_db_size()
-        conn = sqlite3.connect('gold_bot.db')
+        conn = db_connect()
         c = conn.cursor()
         c.execute('SELECT COUNT(*) FROM users')
         user_count = c.fetchone()[0]
@@ -4001,17 +3938,49 @@ async def admin_broadcast_start(update: Update, context: ContextTypes.DEFAULT_TY
     await audit_log(context, user.id, user.username, user_msg, "Started broadcast conversation")
     return ASK_BROADCAST
 
-async def admin_broadcast_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message.text
-    success, failed = await broadcast_text_to_users(context.bot, message, parse_mode=None)
+async def admin_broadcast_preview(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ شما دسترسی ندارید")
+        return ConversationHandler.END
+    message = update.message.text or ""
+    context.user_data["broadcast_draft"] = message
+    preview = message if len(message) <= 500 else message[:500] + "…"
     await update.message.reply_text(
+        f"{preview}\n\n{msg.ADMIN_BROADCAST_CONFIRM}",
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("✅ ارسال", callback_data="broadcast_confirm")],
+                [InlineKeyboardButton("❌ لغو", callback_data="broadcast_cancel")],
+            ]
+        ),
+    )
+    return ASK_BROADCAST_CONFIRM
+
+
+async def admin_broadcast_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user = query.from_user
+    if not is_admin(user.id):
+        await query.answer("❌ شما دسترسی ندارید", show_alert=True)
+        return ConversationHandler.END
+    await query.answer()
+    if query.data != "broadcast_confirm":
+        context.user_data.pop("broadcast_draft", None)
+        await query.edit_message_text("❌ ارسال همگانی لغو شد.")
+        return ConversationHandler.END
+    message = context.user_data.pop("broadcast_draft", None)
+    if not message:
+        await query.edit_message_text("❌ متنی برای ارسال پیدا نشد.")
+        return ConversationHandler.END
+    success, failed = await broadcast_text_to_users(context.bot, message, parse_mode=None)
+    await query.edit_message_text(
         msg.admin_broadcast_result(success, failed),
         reply_markup=kb_back(NAV_ADMIN),
     )
     await audit_log(
         context,
-        update.effective_user.id,
-        update.effective_user.username,
+        user.id,
+        user.username,
         "Broadcast sent",
         f"Message: {message[:200]}... Success: {success}, Failed: {failed}",
     )
@@ -4275,15 +4244,98 @@ async def admin_changelog_manual(update: Update, context: ContextTypes.DEFAULT_T
 on_startup_changelog = on_startup_train_and_changelog
 
 # ================= PRICE MONITORING =================
-# Inside the monitor_prices function loop
-async def monitor_prices(context: ContextTypes.DEFAULT_TYPE):
-    """Background task to monitor prices and send alerts"""
+def _parse_alert_ts(value):
+    if not value:
+        return None
     try:
-        tala, ounce = fetch_and_parse_gold()
-        usd_toman = fetch_and_parse_usd()
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _format_alert_ts(value):
+    if value is None:
+        return None
+    return value.isoformat(timespec="seconds")
+
+
+def get_user_alert_state(user_id):
+    conn = db_connect()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            """SELECT alert_market_observed, alert_market_sent_kind, alert_market_sent_at,
+                      alert_sig_observed, alert_sig_sent_side, alert_sig_sent_at
+               FROM users WHERE user_id = ?""",
+            (user_id,),
+        )
+        row = cursor.fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return (None, None, None, None, None, None)
+    return (
+        row[0],
+        row[1],
+        _parse_alert_ts(row[2]),
+        row[3],
+        row[4],
+        _parse_alert_ts(row[5]),
+    )
+
+
+def save_user_alert_state(
+    user_id,
+    market_observed,
+    market_sent_kind,
+    market_sent_at,
+    sig_observed,
+    sig_sent_side,
+    sig_sent_at,
+):
+    conn = db_connect()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            """UPDATE users SET
+                   alert_market_observed = ?,
+                   alert_market_sent_kind = ?,
+                   alert_market_sent_at = ?,
+                   alert_sig_observed = ?,
+                   alert_sig_sent_side = ?,
+                   alert_sig_sent_at = ?
+               WHERE user_id = ?""",
+            (
+                market_observed,
+                market_sent_kind,
+                _format_alert_ts(market_sent_at),
+                sig_observed,
+                sig_sent_side,
+                _format_alert_ts(sig_sent_at),
+                user_id,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+async def _send_user_alert(context, user_id, text, label):
+    try:
+        await context.bot.send_message(chat_id=user_id, text=text, parse_mode="Markdown")
+        logger.info("%s alert sent to user %s", label, user_id)
+        await asyncio.sleep(0.05)
+    except Exception as exc:
+        logger.warning("Alert send failed for user %s: %s", user_id, exc)
+
+
+async def monitor_prices(context: ContextTypes.DEFAULT_TYPE):
+    """Background task to monitor prices and send alerts when the signal changes."""
+    try:
+        tala, ounce, usd_toman = await asyncio.to_thread(fetch_live_gold_usd)
 
         if not is_plausible_market_prices(tala, usd_toman, ounce):
-            fair = usd_toman * ounce / 41.5
+            fair = fair_gold_price(usd_toman, ounce)
             logger.error(
                 "Monitor skipped: bad inputs tala=%s usd=%s ounce=%s fair=%s",
                 tala,
@@ -4293,22 +4345,26 @@ async def monitor_prices(context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        logger.info(f"Monitor Prices - Fetched Raw Tala: {tala}, Raw USD (Toman): {usd_toman}, Raw Ounce: {ounce}")
+        logger.info(
+            "Monitor Prices - Fetched Raw Tala: %s, Raw USD (Toman): %s, Raw Ounce: %s",
+            tala,
+            usd_toman,
+            ounce,
+        )
         all_users = get_all_users_with_notifications()
         goal_map = get_users_goal_map()
         prediction = None
         if models_ready():
             prediction = predict_future(live_tala=tala, live_usd=usd_toman, live_ounce=ounce)
 
-        analysis_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        now = datetime.now()
+        analysis_time_str = now.strftime("%Y-%m-%d %H:%M:%S")
+        fair = fair_gold_price(usd_toman, ounce)
+        var = tala - fair
 
         for user_tuple in all_users:
             user_id, flags, buy_thresh, wait_thresh, sig_move_thresh = user_tuple
-
-            fair = usd_toman * ounce / 41.5
-            var = tala - fair
-
-            logger.debug(f"Monitor Prices - User {user_id}: Calculated Fair: {fair:.2f}, Diff (Var): {var:.2f}")
+            logger.debug("Monitor Prices - User %s: Calculated Fair: %.2f, Diff (Var): %.2f", user_id, fair, var)
 
             invest_goal, risk_profile = goal_map.get(user_id, (None, None))
             use_ml = (
@@ -4317,97 +4373,84 @@ async def monitor_prices(context: ContextTypes.DEFAULT_TYPE):
                 and invest_goal
                 and risk_profile
             )
-
             if use_ml:
                 signal_info = compute_signal(prediction, invest_goal, risk_profile)
                 status = signal_info["signal"]
-                verdict = {
-                    "BUY": msg.verdict_alert_buy(),
-                    "SELL": msg.verdict_alert_sell(),
-                    "HOLD": msg.verdict_alert_wait(),
-                }[status]
-                if flags & NOTIF_BUY and status == "BUY":
-                    alert_msg = msg.alert_buy(
-                        analysis_time_str, verdict, int(var), tala, int(fair)
-                    )
-                    try:
-                        await context.bot.send_message(
-                            chat_id=user_id, text=alert_msg, parse_mode="Markdown"
-                        )
-                        logger.info(f"BUY Alert (ML) sent to user {user_id}")
-                        await asyncio.sleep(0.05)
-                    except Exception as e:
-                        logger.warning(f"Alert send failed for user {user_id}: {e}")
-
-                if flags & NOTIF_SELL and status == "SELL":
-                    alert_msg = msg.alert_sell(
-                        analysis_time_str, verdict, int(var), tala, int(fair)
-                    )
-                    try:
-                        await context.bot.send_message(
-                            chat_id=user_id, text=alert_msg, parse_mode="Markdown"
-                        )
-                        logger.info(f"SELL Alert (ML) sent to user {user_id}")
-                        await asyncio.sleep(0.05)
-                    except Exception as e:
-                        logger.warning(f"Alert send failed for user {user_id}: {e}")
             else:
-                verdict, emoji, status = determine_verdict(var, buy_thresh, wait_thresh)
-                if flags & NOTIF_BUY and var <= -buy_thresh:
-                    alert_msg = msg.alert_buy(
-                        analysis_time_str, verdict, int(var), tala, int(fair)
-                    )
-                    try:
-                        await context.bot.send_message(
-                            chat_id=user_id, text=alert_msg, parse_mode="Markdown"
-                        )
-                        logger.info(f"BUY Alert sent to user {user_id}")
-                        await asyncio.sleep(0.05)
-                    except Exception as e:
-                        logger.warning(f"Alert send failed for user {user_id}: {e}")
+                _verdict, _emoji, status = determine_verdict(var, buy_thresh, wait_thresh)
 
-                if flags & NOTIF_SELL and var >= wait_thresh:
-                    alert_msg = msg.alert_sell(
-                        analysis_time_str, verdict, int(var), tala, int(fair)
-                    )
-                    try:
-                        await context.bot.send_message(
-                            chat_id=user_id, text=alert_msg, parse_mode="Markdown"
-                        )
-                        logger.info(f"SELL Alert sent to user {user_id}")
-                        await asyncio.sleep(0.05)
-                    except Exception as e:
-                        logger.warning(f"Alert send failed for user {user_id}: {e}")
+            alertable = "HOLD"
+            if status == "BUY" and flags & NOTIF_BUY:
+                alertable = "BUY"
+            elif status == "SELL" and flags & NOTIF_SELL:
+                alertable = "SELL"
 
-            if flags & NOTIF_SIGNIFICANT_MOVE:
-                if abs(var) > sig_move_thresh and var > 0:
-                    alert_msg = msg.alert_significant_move(
-                        analysis_time_str, int(var), tala, int(fair)
-                    )
-                    try:
-                        await context.bot.send_message(
-                            chat_id=user_id,
-                            text=alert_msg,
-                            parse_mode="Markdown"
-                        )
-                        logger.info(f"SIGNIFICANT MOVE Alert sent to user {user_id}")
-                        await asyncio.sleep(0.05)
-                    except Exception as e:
-                        logger.warning(f"Alert send failed for user {user_id}: {e}")
+            prev_market, sent_kind, sent_at, prev_sig, sig_sent, sig_at = get_user_alert_state(user_id)
+            send_market, next_market, next_kind, next_sent_at = market_transition(
+                prev_market, alertable, sent_kind, sent_at, now, ALERT_COOLDOWN
+            )
+            thr = sig_move_thresh if sig_move_thresh is not None else 700_000
+            side = (
+                significant_side(var, thr)
+                if flags & NOTIF_SIGNIFICANT_MOVE
+                else "none"
+            )
+            send_sig, next_sig, next_sig_side, next_sig_at = significant_transition(
+                prev_sig, side, sig_sent, sig_at, now, ALERT_COOLDOWN
+            )
 
-    except Exception as e:
+            verdict = {
+                "BUY": msg.verdict_alert_buy(),
+                "SELL": msg.verdict_alert_sell(),
+                "HOLD": msg.verdict_alert_wait(),
+            }[status if status in ("BUY", "SELL", "HOLD") else "HOLD"]
+
+            if send_market and alertable == "BUY":
+                await _send_user_alert(
+                    context,
+                    user_id,
+                    msg.alert_buy(analysis_time_str, verdict, int(var), tala, int(fair)),
+                    "BUY",
+                )
+            elif send_market and alertable == "SELL":
+                await _send_user_alert(
+                    context,
+                    user_id,
+                    msg.alert_sell(analysis_time_str, verdict, int(var), tala, int(fair)),
+                    "SELL",
+                )
+            if send_sig:
+                await _send_user_alert(
+                    context,
+                    user_id,
+                    msg.alert_significant_move(
+                        analysis_time_str, int(var), tala, int(fair), side=next_sig
+                    ),
+                    "SIGNIFICANT",
+                )
+
+            if (
+                next_market,
+                next_kind,
+                next_sent_at,
+                next_sig,
+                next_sig_side,
+                next_sig_at,
+            ) != (prev_market, sent_kind, sent_at, prev_sig, sig_sent, sig_at):
+                save_user_alert_state(
+                    user_id,
+                    next_market,
+                    next_kind,
+                    next_sent_at,
+                    next_sig,
+                    next_sig_side,
+                    next_sig_at,
+                )
+
+    except Exception:
         logger.exception("Price monitoring failed")
 
     persist_crypto_snapshots()
-
-def determine_verdict(var, buy_thresh, wait_thresh):
-    """Determine the verdict, emoji, and status based on var and thresholds."""
-    if var <= -buy_thresh:
-        return msg.verdict_alert_buy(), "🟢", "BUY"
-    elif var >= wait_thresh:
-        return msg.verdict_alert_sell(), "🔴", "SELL"
-    else:
-        return msg.verdict_alert_wait(), "🟡", "HOLD"
 
 # ================= MAIN =================
 def main():
@@ -4525,7 +4568,10 @@ def main():
         entry_points=[CommandHandler("broadcast", admin_broadcast_start)],
         states={
             ASK_BROADCAST: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_broadcast_send),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_broadcast_preview),
+            ],
+            ASK_BROADCAST_CONFIRM: [
+                CallbackQueryHandler(admin_broadcast_send, pattern=r"^broadcast_(confirm|cancel)$"),
             ],
         },
         fallbacks=[CommandHandler("cancel", admin_broadcast_cancel)],
@@ -4554,18 +4600,6 @@ def main():
         states={
             ASK_AMOUNT: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, calc_amount),
-                CallbackQueryHandler(handle_nav_back, pattern='^nav_back:'),
-            ],
-        },
-        fallbacks=[CallbackQueryHandler(handle_nav_back, pattern='^nav_back:')],
-    ))
-
-    # Threshold setting conversation
-    app.add_handler(ConversationHandler(
-        entry_points=[CallbackQueryHandler(set_threshold_type, pattern='^set_(buy|wait)_threshold$')],
-        states={
-            ASK_THRESHOLD_VALUE: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, set_threshold_value),
                 CallbackQueryHandler(handle_nav_back, pattern='^nav_back:'),
             ],
         },

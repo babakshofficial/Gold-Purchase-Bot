@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from price_outliers import delete_price_outliers, detect_price_outliers
+from pricing import fair_gold_price
 
 
 class TestPriceOutliers(unittest.TestCase):
@@ -28,7 +29,7 @@ class TestPriceOutliers(unittest.TestCase):
             """
         )
         # Good row: usd 254k, ounce 4396 → fair ~27M, tala close to fair
-        fair = 254_000 * 4396 / 41.5
+        fair = fair_gold_price(254_000, 4396)
         tala = int(fair + 200_000)
         conn.execute(
             "INSERT INTO price_history (timestamp, tala_price, usd_price, ounce_price, fair_price, difference, source) VALUES (?,?,?,?,?,?,?)",

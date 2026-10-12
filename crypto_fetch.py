@@ -8,6 +8,8 @@ from typing import Any
 import requests
 from bs4 import BeautifulSoup
 
+from pricing import normalize
+
 logger = logging.getLogger("gold_bot")
 
 CRYPTO_CHANNEL_USERNAME = "arz_247"
@@ -25,15 +27,6 @@ REQUEST_TIMEOUT = 30
 MAX_FETCH_ATTEMPTS = 5
 RETRY_BACKOFF_FACTOR = 2
 MESSAGES_TO_SCAN = 5
-
-
-def normalize(text: str) -> str:
-    persian = "۰۱۲۳۴۵۶۷۸۹"
-    arabic = "٠١٢٣٤٥٦٧٨٩"
-    for i in range(10):
-        text = text.replace(persian[i], str(i))
-        text = text.replace(arabic[i], str(i))
-    return text.replace("٬", ",").replace("،", ",")
 
 
 def parse_toman_value(raw: str, unit: str | None) -> float:
@@ -297,9 +290,9 @@ def save_crypto_price_history(prices: dict, db_path: str = DEFAULT_CRYPTO_DB) ->
     """Save a snapshot of crypto prices (one row per symbol). Returns rows inserted."""
     if not prices:
         return 0
-    import sqlite3
+    from db import connect
 
-    conn = sqlite3.connect(db_path)
+    conn = connect(db_path)
     c = conn.cursor()
     count = 0
     for symbol, data in prices.items():

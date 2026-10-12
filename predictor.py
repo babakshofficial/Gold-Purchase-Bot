@@ -5,11 +5,14 @@ from __future__ import annotations
 import json
 import logging
 import pickle
-import sqlite3
 from pathlib import Path
 from typing import Any
 
+import joblib
 import numpy as np
+
+from db import connect
+from pricing import fair_gold_price
 
 logger = logging.getLogger("gold_bot")
 
@@ -72,8 +75,8 @@ def models_ready(models_dir: Path | str = DEFAULT_MODELS_DIR) -> bool:
     ).exists()
 
 
-def _fetch_rows(db_path: str) -> list[tuple]:
-    conn = sqlite3.connect(db_path)
+def _fetch_rows(db_path: str | None = None) -> list[tuple]:
+    conn = connect(db_path)
     try:
         c = conn.cursor()
         c.execute(
@@ -99,7 +102,7 @@ def _parse_ts(value: str):
         return dt.strptime(text[:19], "%Y-%m-%d %H:%M:%S")
 
 
-def load_daily_bars(db_path: str = DEFAULT_DB) -> dict[str, np.ndarray]:
+def load_daily_bars(db_path: str | None = None) -> dict[str, np.ndarray]:
     """Build daily OHLC bars from every price_history row (all sources).
 
     Uses the full DB: open/high/low/close + tick count + intraday range from
@@ -173,7 +176,7 @@ def load_daily_bars(db_path: str = DEFAULT_DB) -> dict[str, np.ndarray]:
     }
 
 
-def load_daily_arrays(db_path: str = DEFAULT_DB) -> dict[str, np.ndarray]:
+def load_daily_arrays(db_path: str | None = None) -> dict[str, np.ndarray]:
     """Daily last-close series from all sources (charts / history tail)."""
     bars = load_daily_bars(db_path)
     if not bars:
@@ -189,7 +192,7 @@ def load_daily_arrays(db_path: str = DEFAULT_DB) -> dict[str, np.ndarray]:
     }
 
 
-def load_series_arrays(db_path: str = DEFAULT_DB) -> dict[str, np.ndarray]:
+def load_series_arrays(db_path: str | None = None) -> dict[str, np.ndarray]:
     """Raw intraday rows (debug / compatibility). Prefer load_daily_bars for ML."""
     rows = _fetch_rows(db_path)
     if not rows:
@@ -336,6 +339,31 @@ def _make_model():
     return RidgeRegressor(alpha=10.0)
 
 
+def _score_holdout(pred: np.ndarray, y_test: np.ndarray) -> dict[str, float]:
+    """Holdout scores. MAE stays in percentage points for the admin panel."""
+    err = np.abs(pred - y_test)
+    mae = float(np.mean(err))
+    denom = np.abs(y_test)
+    mape_mask = denom > 1e-8
+    if np.any(mape_mask):
+        mape = float(np.mean(err[mape_mask] / denom[mape_mask]) * 100.0)
+    else:
+        mape = 0.0
+    direction_mask = np.abs(y_test) > 1e-8
+    if np.any(direction_mask):
+        dir_acc = float(
+            np.mean(np.sign(pred[direction_mask]) == np.sign(y_test[direction_mask])) * 100.0
+        )
+    else:
+        dir_acc = 0.0
+    return {
+        "mae_return": mae,
+        "mae": mae * 100.0,
+        "mape": mape,
+        "dir_acc": dir_acc,
+    }
+
+
 def _train_one(X: np.ndarray, y: np.ndarray) -> tuple[Any, dict]:
     mask = np.isfinite(y) & np.all(np.isfinite(X), axis=1)
     Xv, yv = X[mask], y[mask]
@@ -346,8 +374,8 @@ def _train_one(X: np.ndarray, y: np.ndarray) -> tuple[Any, dict]:
     X_train, X_test = Xv[:split], Xv[split:]
     y_train, y_test = yv[:split], yv[split:]
 
-    model = _make_model()
-    model.fit(X_train, y_train)
+    holdout = _make_model()
+    holdout.fit(X_train, y_train)
 
     metrics: dict[str, float] = {
         "n_train": float(len(X_train)),
@@ -356,14 +384,12 @@ def _train_one(X: np.ndarray, y: np.ndarray) -> tuple[Any, dict]:
         "target": TARGET_MODE,
     }
     if len(X_test) > 0:
-        pred = np.asarray(model.predict(X_test), dtype=float)
-        # Metrics in return space; also report MAE in % points
-        mae = float(np.mean(np.abs(pred - y_test)))
-        metrics["mae_return"] = mae
-        metrics["mae"] = mae * 100.0  # percentage points for admin display
-        metrics["mape"] = mae * 100.0
-        # Directional accuracy (up/down)
-        metrics["dir_acc"] = float(np.mean(np.sign(pred) == np.sign(y_test)) * 100)
+        pred = np.asarray(holdout.predict(X_test), dtype=float)
+        metrics.update(_score_holdout(pred, y_test))
+
+    model = _make_model()
+    model.fit(Xv, yv)
+    metrics["n_refit"] = float(len(Xv))
     return model, metrics
 
 
@@ -500,7 +526,7 @@ def save_last_prediction(prediction: dict, models_dir: Path | str = DEFAULT_MODE
 
 
 def train_and_save(
-    db_path: str = DEFAULT_DB,
+    db_path: str | None = None,
     models_dir: Path | str = DEFAULT_MODELS_DIR,
     triggered_by: str = "cli",
 ) -> dict:
@@ -529,8 +555,7 @@ def train_and_save(
         all_metrics: dict[str, Any] = {}
         for h in HORIZONS:
             model, metrics = _train_one(X, targets[h])
-            with open(models_dir / f"model_{h}d.pkl", "wb") as f:
-                pickle.dump(model, f)
+            joblib.dump(model, models_dir / f"model_{h}d.pkl")
             all_metrics[f"{h}d"] = metrics
             logger.info("Trained model_%sd: %s", h, metrics)
 
@@ -634,17 +659,24 @@ def clear_models(models_dir: Path | str = DEFAULT_MODELS_DIR) -> list[str]:
     return deleted
 
 
+def _load_model(path: Path):
+    try:
+        return joblib.load(path)
+    except Exception:
+        with open(path, "rb") as handle:
+            return pickle.load(handle)
+
+
 def _load_models(models_dir: Path):
     cols = json.loads((models_dir / FEATURE_FILE).read_text())
     models = {}
     for h in HORIZONS:
-        with open(models_dir / f"model_{h}d.pkl", "rb") as f:
-            models[h] = pickle.load(f)
+        models[h] = _load_model(models_dir / f"model_{h}d.pkl")
     return models, cols
 
 
 def predict_future(
-    db_path: str = DEFAULT_DB,
+    db_path: str | None = None,
     models_dir: Path | str = DEFAULT_MODELS_DIR,
     live_tala: float | None = None,
     live_usd: float | None = None,
@@ -694,7 +726,7 @@ def predict_future(
             if live_ounce is not None:
                 data["ounce"][-1] = live_ounce
             if live_usd and live_ounce:
-                fair = live_usd * live_ounce / 41.5
+                fair = fair_gold_price(live_usd, live_ounce)
                 data["fair"][-1] = fair
                 data["difference"][-1] = live_tala - fair
 
@@ -768,7 +800,7 @@ def predict_future(
         return empty
 
 
-def daily_history_tail(db_path: str = DEFAULT_DB, days: int = 30):
+def daily_history_tail(db_path: str | None = None, days: int = 30):
     """Return list of (date_str, tala) for charting."""
     data = load_daily_arrays(db_path)
     if not data:

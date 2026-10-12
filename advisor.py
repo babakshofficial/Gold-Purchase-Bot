@@ -2,17 +2,10 @@
 
 from __future__ import annotations
 
-import logging
 import os
 from typing import Any
 
-import httpx
-
-logger = logging.getLogger("gold_bot")
-
-from changelog import openrouter_model
-
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+from llm_client import openrouter_chat
 
 
 def _fallback_advice(
@@ -73,30 +66,14 @@ async def get_persian_advice(
 
 بر اساس این اطلاعات، یک توصیه کوتاه و عملی به فارسی بده."""
 
-    try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                OPENROUTER_URL,
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "HTTP-Referer": "https://t.me/gold_bot",
-                    "X-Title": "Gold Bot",
-                },
-                json={
-                    "model": openrouter_model(),
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                    "max_tokens": 300,
-                    "temperature": 0.7,
-                },
-                timeout=15.0,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            content = data["choices"][0]["message"]["content"]
-            return f"🤖 **تحلیل هوشمند:**\n{content}"
-    except Exception as e:
-        logger.warning("OpenRouter advice failed: %s", e)
+    content = await openrouter_chat(
+        system=system_prompt,
+        user=user_prompt,
+        max_tokens=300,
+        temperature=0.7,
+        title="Gold Bot",
+        timeout=15.0,
+    )
+    if not content:
         return _fallback_advice(user_goal, user_risk, prediction, signal)
+    return f"🤖 **تحلیل هوشمند:**\n{content}"
